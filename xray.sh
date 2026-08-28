@@ -1,5 +1,5 @@
 #!/bin/bash
-# VLESS-Reality 一键自动化部署脚本 (双引擎适配版：支持 Debian/Ubuntu & Alpine)
+# VLESS-Reality 一键自动化部署脚本 (双引擎适配版)
 
 # 1. 确保以 root 权限运行
 if [ "$(id -u)" != "0" ]; then
@@ -13,26 +13,71 @@ echo "====================================="
 if command -v apk >/dev/null 2>&1; then
     echo "✅ 检测到 Alpine Linux (OpenRC)，正在使用 apk 安装依赖..."
     apk update
-    apk add --no-cache bash curl openssl
+    apk add --no-cache bash curl openssl unzip grep
 elif command -v apt >/dev/null 2>&1; then
     echo "✅ 检测到 Debian/Ubuntu (systemd)，正在使用 apt 安装依赖..."
     apt update -y
-    apt install -y curl openssl bash
+    apt install -y curl openssl bash unzip grep
 else
     echo "⚠️ 警告：未识别到 apt 或 apk 包管理器，将尝试跳过依赖安装..."
 fi
 
+# 提前创建所需的所有目录
+mkdir -p /usr/local/bin /usr/local/etc/xray /usr/local/share/xray
+
 echo -e "\n====================================="
 echo "2. 开始安装最新版 Xray-core..."
 echo "====================================="
-# 调用官方脚本，官方脚本内部会自动根据 x86/arm 架构下载对应文件
-bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install -u root
+if command -v systemctl >/dev/null 2>&1; then
+    echo "✅ 系统支持 systemd，调用官方一键安装脚本..."
+    bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install -u root
+else
+    echo "✅ 系统为 Alpine (非 systemd)，正在手动下载部署 Xray-core..."
+    
+    # 获取 CPU 架构
+    MACHINE=$(uname -m)
+    if [ "$MACHINE" = "x86_64" ]; then
+        ZIP_NAME="Xray-linux-64.zip"
+    elif [ "$MACHINE" = "aarch64" ]; then
+        ZIP_NAME="Xray-linux-arm64-v8a.zip"
+    else
+        echo "❌ 不支持的架构: $MACHINE"
+        exit 1
+    fi
+    
+    # 动态获取最新版本号 (绕过 GitHub API 请求限制)
+    VERSION=$(curl -sL -o /dev/null -w %{url_effective} https://github.com/XTLS/Xray-core/releases/latest | grep -oE '[^/]+$')
+    
+    if [ -z "$VERSION" ]; then
+        echo "❌ 无法获取 Xray 最新版本号，请检查网络。"
+        exit 1
+    fi
+    
+    echo "⬇️ 正在下载 Xray ${VERSION} (${ZIP_NAME})..."
+    curl -sL -o /tmp/xray.zip "https://github.com/XTLS/Xray-core/releases/download/${VERSION}/${ZIP_NAME}"
+    
+    echo "📦 正在解压并配置环境变量..."
+    unzip -q -o /tmp/xray.zip -d /tmp/xray_ext
+    mv -f /tmp/xray_ext/xray /usr/local/bin/
+    mv -f /tmp/xray_ext/geoip.dat /usr/local/share/xray/
+    mv -f /tmp/xray_ext/geosite.dat /usr/local/share/xray/
+    chmod +x /usr/local/bin/xray
+    rm -rf /tmp/xray.zip /tmp/xray_ext
+fi
 
 echo -e "\n====================================="
 echo "3. 正在生成高强度加密凭证..."
 echo "====================================="
-UUID=$(xray uuid)
-KEYS=$(xray x25519)
+# 强制使用绝对路径执行，防止 Alpine 下环境变量未刷新
+XRAY_BIN="/usr/local/bin/xray"
+
+if [ ! -f "$XRAY_BIN" ]; then
+    echo "❌ 致命错误：Xray 核心二进制文件不存在，安装失败！"
+    exit 1
+fi
+
+UUID=$($XRAY_BIN uuid)
+KEYS=$($XRAY_BIN x25519)
 PRIVATE_KEY=$(echo "$KEYS" | grep "Private key:" | awk '{print $3}')
 PUBLIC_KEY=$(echo "$KEYS" | grep "Public key:" | awk '{print $3}')
 SHORT_ID=$(openssl rand -hex 8)
@@ -104,7 +149,7 @@ echo -e "\n====================================="
 echo "5. 配置系统服务并启动 Xray..."
 echo "====================================="
 if command -v systemctl >/dev/null 2>&1; then
-    # Debian / Ubuntu 的 systemd 启动逻辑
+    # Debian / Ubuntu 逻辑
     echo "🔧 使用 systemd 注册服务..."
     systemctl enable xray
     systemctl restart xray
@@ -116,10 +161,9 @@ if command -v systemctl >/dev/null 2>&1; then
     fi
 
 elif command -v rc-update >/dev/null 2>&1; then
-    # Alpine 的 OpenRC 启动逻辑
+    # Alpine 逻辑
     echo "🔧 使用 OpenRC 注册服务 (Alpine 特供)..."
     
-    # 写入 OpenRC 守护脚本
     cat > /etc/init.d/xray << 'EOF'
 #!/sbin/openrc-run
 
@@ -135,26 +179,23 @@ depend() {
     after network
 }
 EOF
-    # 赋予执行权限并加入开机自启
     chmod +x /etc/init.d/xray
     rc-update add xray default
     rc-service xray restart
     sleep 2
     
-    # 检查运行状态
     if rc-service xray status | grep -q "started"; then
         echo "✅ Xray 服务已成功启动！"
     else
         echo "❌ 警告：Xray 服务未成功启动，请使用 rc-service xray status 检查。"
     fi
 else
-    echo "⚠️ 警告：系统不支持 systemctl 或 rc-update，无法配置开机自启。请手动运行 Xray。"
+    echo "⚠️ 警告：系统不支持 systemctl 或 rc-update，请手动运行 Xray。"
 fi
 
 echo -e "\n====================================="
 echo "6. 生成节点分享链接..."
 echo "====================================="
-# 获取公网 IPv4
 SERVER_IP=$(curl -s -4 ip.sb)
 if [ -z "$SERVER_IP" ]; then
     SERVER_IP=$(curl -s -4 ifconfig.me)
