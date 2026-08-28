@@ -1,6 +1,6 @@
 #!/bin/bash
 # VLESS-Reality 64M极限低内存优化版 (双引擎适配: Debian & Alpine)
-# 【内置 WARP 自动分流，完美解决 -1ms 超时与 ChatGPT 解锁】
+# 【纯净直连版：去除 WARP 分流，直接通过本机网络出站】
 
 if [ "$(id -u)" != "0" ]; then
    echo "错误：请使用 root 权限运行"
@@ -21,11 +21,10 @@ elif command -v apt >/dev/null 2>&1; then
     apt install -y curl openssl bash unzip awk
 fi
 
-# 提前创建所需的所有目录
 mkdir -p /usr/local/bin /usr/local/etc/xray /root/xray_temp
 
 echo -e "\n====================================="
-echo "2. 极限低内存模式：开始下载并部署 Xray..."
+echo "2. 极限低内存模式：开始部署 Xray..."
 echo "====================================="
 MACHINE=$(uname -m)
 if [ "$MACHINE" = "x86_64" ]; then
@@ -43,14 +42,11 @@ if [ -z "$VERSION" ]; then
     exit 1
 fi
 
-echo "⬇️ 正在下载 Xray ${VERSION} (直接写入硬盘以防 OOM)..."
+echo "⬇️ 正在下载 Xray ${VERSION} ..."
 curl -sL -o /root/xray_temp/xray.zip "https://github.com/XTLS/Xray-core/releases/download/${VERSION}/${ZIP_NAME}"
 
-echo "📦 正在解压..."
 unzip -q -o /root/xray_temp/xray.zip -d /root/xray_temp/
 mv -f /root/xray_temp/xray /usr/local/bin/
-
-echo "🗑️ 抛弃臃肿的 Geo 数据文件以节省内存..."
 rm -rf /root/xray_temp
 chmod +x /usr/local/bin/xray
 
@@ -61,7 +57,6 @@ XRAY_BIN="/usr/local/bin/xray"
 UUID=$($XRAY_BIN uuid)
 KEYS=$($XRAY_BIN x25519)
 
-# 【重点修复】：使用 $NF 提取最后一列，无视空格导致的抓取为空 bug
 PRIVATE_KEY=$(echo "$KEYS" | awk '/Private/ {print $NF}')
 PUBLIC_KEY=$(echo "$KEYS" | awk '/Public/ {print $NF}')
 SHORT_ID=$(openssl rand -hex 8)
@@ -70,9 +65,8 @@ DEST_SNI="itunes.apple.com"
 PORT=30333
 
 echo -e "\n====================================="
-echo "4. 正在生成 Xray 配置文件 (已集成 WARP)..."
+echo "4. 正在生成 Xray 配置文件 (纯直连模式)..."
 echo "====================================="
-# 注意：outbounds 已强制将流量转发至 WARP 端口 (127.0.0.1:40000)
 cat > /usr/local/etc/xray/config.json <<EOF
 {
     "log": {
@@ -117,43 +111,24 @@ cat > /usr/local/etc/xray/config.json <<EOF
     ],
     "outbounds": [
         {
-            "protocol": "socks",
-            "tag": "warp-out",
-            "settings": {
-                "servers": [
-                    {
-                        "address": "127.0.0.1",
-                        "port": 40000
-                    }
-                ]
-            }
-        },
-        {
             "protocol": "freedom",
             "tag": "direct"
+        },
+        {
+            "protocol": "blackhole",
+            "tag": "block"
         }
-    ],
-    "routing": {
-        "rules": [
-            {
-                "type": "field",
-                "outboundTag": "warp-out",
-                "network": "tcp,udp"
-            }
-        ]
-    }
+    ]
 }
 EOF
 
 echo -e "\n====================================="
-echo "5. 配置系统服务并限制其内存使用上限..."
+echo "5. 配置系统服务并限制内存..."
 echo "====================================="
 if command -v systemctl >/dev/null 2>&1; then
-    echo "🔧 使用 systemd 注册服务..."
     cat > /etc/systemd/system/xray.service << 'EOF'
 [Unit]
 Description=Xray Service
-Documentation=https://github.com/xtls
 After=network.target nss-lookup.target
 
 [Service]
@@ -174,7 +149,6 @@ EOF
     systemctl restart xray
     sleep 2
 elif command -v rc-update >/dev/null 2>&1; then
-    echo "🔧 使用 OpenRC 注册服务 (Alpine 特供)..."
     cat > /etc/init.d/xray << 'EOF'
 #!/sbin/openrc-run
 
@@ -213,8 +187,7 @@ printf "\033[32m🎉 部署成功！请复制以下 VLESS 链接，导入至客�
 printf "==========================================================================\n\n"
 echo "vless://${UUID}@${SERVER_IP}:${PORT}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=chrome&type=tcp&flow=xtls-rprx-vision&sni=${DEST_SNI}&sid=${SHORT_ID}#VLESS-Reality-Apple"
 printf "\n==========================================================================\n"
-printf "📌 节点配置信息：\n"
+printf "📌 节点配置信息 (纯直连版)：\n"
 printf "  - 内网端口：\033[33m%s\033[0m (务必去面板设置外网端口映射！)\n" "$PORT"
 printf "  - 公钥 (pbk)：\033[33m%s\033[0m\n" "$PUBLIC_KEY"
-printf "  - 提示：本机流量已默认交由本地 40000 端口 (WARP) 代理。\n"
 printf "==========================================================================\n"
