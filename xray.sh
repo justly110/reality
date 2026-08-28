@@ -1,88 +1,67 @@
 #!/bin/bash
-# VLESS-Reality 一键自动化部署脚本 (双引擎适配版)
+# VLESS-Reality 64M极限低内存优化版 (双引擎适配: Debian & Alpine)
 
-# 1. 确保以 root 权限运行
 if [ "$(id -u)" != "0" ]; then
-   echo "错误：请使用 root 权限运行此脚本"
+   echo "错误：请使用 root 权限运行"
    exit 1
 fi
+
+# 尝试清理系统缓存释放内存 (在 LXC 容器中可能失效，所以加了 || true)
+sync; echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
 
 echo "====================================="
 echo "1. 自动检测系统并安装必备依赖组件..."
 echo "====================================="
 if command -v apk >/dev/null 2>&1; then
-    echo "✅ 检测到 Alpine Linux (OpenRC)，正在使用 apk 安装依赖..."
     apk update
     apk add --no-cache bash curl openssl unzip grep
 elif command -v apt >/dev/null 2>&1; then
-    echo "✅ 检测到 Debian/Ubuntu (systemd)，正在使用 apt 安装依赖..."
     apt update -y
     apt install -y curl openssl bash unzip grep
-else
-    echo "⚠️ 警告：未识别到 apt 或 apk 包管理器，将尝试跳过依赖安装..."
 fi
 
 # 提前创建所需的所有目录
-mkdir -p /usr/local/bin /usr/local/etc/xray /usr/local/share/xray
+mkdir -p /usr/local/bin /usr/local/etc/xray /usr/local/share/xray /root/xray_temp
 
 echo -e "\n====================================="
-echo "2. 开始安装最新版 Xray-core..."
+echo "2. 极限低内存模式：开始下载并部署 Xray..."
 echo "====================================="
-if command -v systemctl >/dev/null 2>&1; then
-    echo "✅ 系统支持 systemd，调用官方一键安装脚本..."
-    bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install -u root
+# 为了防止 64M 小鸡爆内存，我们统统放弃官方脚本，全程手动在【硬盘】中操作
+MACHINE=$(uname -m)
+if [ "$MACHINE" = "x86_64" ]; then
+    ZIP_NAME="Xray-linux-64.zip"
+elif [ "$MACHINE" = "aarch64" ]; then
+    ZIP_NAME="Xray-linux-arm64-v8a.zip"
 else
-    echo "✅ 系统为 Alpine (非 systemd)，正在手动下载部署 Xray-core..."
-    
-    # 获取 CPU 架构
-    MACHINE=$(uname -m)
-    if [ "$MACHINE" = "x86_64" ]; then
-        ZIP_NAME="Xray-linux-64.zip"
-    elif [ "$MACHINE" = "aarch64" ]; then
-        ZIP_NAME="Xray-linux-arm64-v8a.zip"
-    else
-        echo "❌ 不支持的架构: $MACHINE"
-        exit 1
-    fi
-    
-    # 动态获取最新版本号 (绕过 GitHub API 请求限制)
-    VERSION=$(curl -sL -o /dev/null -w %{url_effective} https://github.com/XTLS/Xray-core/releases/latest | grep -oE '[^/]+$')
-    
-    if [ -z "$VERSION" ]; then
-        echo "❌ 无法获取 Xray 最新版本号，请检查网络。"
-        exit 1
-    fi
-    
-    echo "⬇️ 正在下载 Xray ${VERSION} (${ZIP_NAME})..."
-    curl -sL -o /tmp/xray.zip "https://github.com/XTLS/Xray-core/releases/download/${VERSION}/${ZIP_NAME}"
-    
-    echo "📦 正在解压并配置环境变量..."
-    unzip -q -o /tmp/xray.zip -d /tmp/xray_ext
-    mv -f /tmp/xray_ext/xray /usr/local/bin/
-    mv -f /tmp/xray_ext/geoip.dat /usr/local/share/xray/
-    mv -f /tmp/xray_ext/geosite.dat /usr/local/share/xray/
-    chmod +x /usr/local/bin/xray
-    rm -rf /tmp/xray.zip /tmp/xray_ext
+    echo "❌ 不支持的架构: $MACHINE"
+    exit 1
 fi
+
+VERSION=$(curl -sL -o /dev/null -w %{url_effective} https://github.com/XTLS/Xray-core/releases/latest | grep -oE '[^/]+$')
+
+echo "⬇️ 正在下载 Xray ${VERSION} (直接写入硬盘以防 OOM)..."
+# 下载到 /root 目录下 (硬盘) 而不是 /tmp (内存)
+curl -sL -o /root/xray_temp/xray.zip "https://github.com/XTLS/Xray-core/releases/download/${VERSION}/${ZIP_NAME}"
+
+echo "📦 正在解压..."
+unzip -q -o /root/xray_temp/xray.zip -d /root/xray_temp/
+mv -f /root/xray_temp/xray /usr/local/bin/
+
+# 【极限优化】直接删除自带的庞大 Geo 数据库文件，不移动，也不让 Xray 载入，节省 10M+ 内存
+echo "🗑️ 抛弃臃肿的 Geo 数据文件以节省内存..."
+rm -rf /root/xray_temp
+chmod +x /usr/local/bin/xray
 
 echo -e "\n====================================="
 echo "3. 正在生成高强度加密凭证..."
 echo "====================================="
-# 强制使用绝对路径执行，防止 Alpine 下环境变量未刷新
 XRAY_BIN="/usr/local/bin/xray"
-
-if [ ! -f "$XRAY_BIN" ]; then
-    echo "❌ 致命错误：Xray 核心二进制文件不存在，安装失败！"
-    exit 1
-fi
-
 UUID=$($XRAY_BIN uuid)
 KEYS=$($XRAY_BIN x25519)
 PRIVATE_KEY=$(echo "$KEYS" | grep "Private key:" | awk '{print $3}')
 PUBLIC_KEY=$(echo "$KEYS" | grep "Public key:" | awk '{print $3}')
 SHORT_ID=$(openssl rand -hex 8)
 
-# 自定义配置（SNI 与 端口）
 DEST_SNI="itunes.apple.com"
 PORT=30333
 
@@ -126,8 +105,7 @@ cat > /usr/local/etc/xray/config.json <<EOF
                 "enabled": true,
                 "destOverride": [
                     "http",
-                    "tls",
-                    "quic"
+                    "tls"
                 ]
             }
         }
@@ -136,32 +114,49 @@ cat > /usr/local/etc/xray/config.json <<EOF
         {
             "protocol": "freedom",
             "tag": "direct"
-        },
-        {
-            "protocol": "blackhole",
-            "tag": "block"
         }
     ]
 }
 EOF
 
 echo -e "\n====================================="
-echo "5. 配置系统服务并启动 Xray..."
+echo "5. 配置系统服务并限制其内存使用上限..."
 echo "====================================="
 if command -v systemctl >/dev/null 2>&1; then
-    # Debian / Ubuntu 逻辑
     echo "🔧 使用 systemd 注册服务..."
+    
+    # 写入 systemd 配置文件并注入 Go 内存限制参数
+    cat > /etc/systemd/system/xray.service << 'EOF'
+[Unit]
+Description=Xray Service
+Documentation=https://github.com/xtls
+After=network.target nss-lookup.target
+
+[Service]
+# 注入内存压缩环境变量
+Environment="GOGC=20"
+Environment="GOMEMLIMIT=30MiB"
+Environment="GODEBUG=madvdontneed=1"
+ExecStart=/usr/local/bin/xray run -config /usr/local/etc/xray/config.json
+Restart=on-failure
+RestartPreventExitStatus=23
+LimitNPROC=10000
+LimitNOFILE=1000000
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload
     systemctl enable xray
     systemctl restart xray
     sleep 2
     if systemctl is-active --quiet xray; then
         echo "✅ Xray 服务已成功启动！"
     else
-        echo "❌ 警告：Xray 服务未成功启动，请使用 systemctl status xray 检查错误日志。"
+        echo "❌ 启动失败，可能是内存仍不足。"
     fi
 
 elif command -v rc-update >/dev/null 2>&1; then
-    # Alpine 逻辑
     echo "🔧 使用 OpenRC 注册服务 (Alpine 特供)..."
     
     cat > /etc/init.d/xray << 'EOF'
@@ -174,6 +169,11 @@ command_args="run -c /usr/local/etc/xray/config.json"
 command_background="yes"
 pidfile="/var/run/${RC_SVCNAME}.pid"
 
+# 注入内存压缩环境变量
+export GOGC=20
+export GOMEMLIMIT=30MiB
+export GODEBUG=madvdontneed=1
+
 depend() {
     need net
     after network
@@ -183,14 +183,11 @@ EOF
     rc-update add xray default
     rc-service xray restart
     sleep 2
-    
     if rc-service xray status | grep -q "started"; then
         echo "✅ Xray 服务已成功启动！"
     else
-        echo "❌ 警告：Xray 服务未成功启动，请使用 rc-service xray status 检查。"
+        echo "❌ 启动失败，请检查。"
     fi
-else
-    echo "⚠️ 警告：系统不支持 systemctl 或 rc-update，请手动运行 Xray。"
 fi
 
 echo -e "\n====================================="
@@ -206,7 +203,5 @@ printf "\033[32m🎉 部署成功！请复制以下 VLESS 链接，导入至客�
 printf "==========================================================================\n\n"
 echo "vless://${UUID}@${SERVER_IP}:${PORT}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=chrome&type=tcp&flow=xtls-rprx-vision&sni=${DEST_SNI}&sid=${SHORT_ID}#VLESS-Reality-Apple"
 printf "\n==========================================================================\n"
-printf "📌 温馨提示：\n"
-printf "1. 您的节点端口为 \033[33m%s\033[0m，如果是 NAT 服务器，请务必在面板配置内网映射！\n" "$PORT"
-printf "2. SNI 伪装域名为 \033[33m%s\033[0m。\n" "$DEST_SNI"
+printf "📌 节点端口为 \033[33m%s\033[0m，如果是 NAT 服务器，别忘了配置内网端口映射！\n" "$PORT"
 printf "==========================================================================\n"
