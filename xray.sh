@@ -185,7 +185,7 @@ fi
 printf "\n==========================================================================\n"
 printf "\033[32m🎉 部署成功！请复制以下 VLESS 链接，导入至客户端：\033[0m\n"
 printf "==========================================================================\n\n"
-echo "vless://${UUID}@${SERVER_IP}:${PORT}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=chrome&type=tcp&flow=xtls-rprx-vision&sni=${DEST_SNI}&sid=${SHORT_ID}#VLESS-Reality-Apple"
+echo "vless://${UUID}@${SERVER_IP}:${PORT}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=chrome&type=tcp&flow=xtls-rprx-vision&sni=${DEST_SNI}&sid=${SHORT_ID}#Reality"
 printf "\n==========================================================================\n"
 printf "📌 节点配置信息 (纯直连版)：\n"
 printf "  - 内网端口：\033[33m%s\033[0m (务必去面板设置外网端口映射！)\n" "$PORT"
