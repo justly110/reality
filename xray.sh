@@ -8,7 +8,7 @@ if [ "$(id -u)" != "0" ]; then
 fi
 
 # 尝试清理系统缓存释放内存
-sync; echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
+sync; echo 3 2>/dev/null > /proc/sys/vm/drop_caches || true
 
 echo "====================================="
 echo "1. 安装必备依赖组件..."
