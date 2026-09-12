@@ -289,6 +289,42 @@ show_logs() {
     read -n 1 -s -r -p "按任意键返回菜单..."
 }
 
+# 彻底卸载
+uninstall_xray() {
+    echo ""
+    read -p "⚠️  确定要彻底卸载 Xray 及其配置与管理脚本吗？[y/N]: " confirm
+    case "$confirm" in
+        [yY][eE][sS]|[yY])
+            echo -e "\n正在停止并清理服务..."
+            if command -v systemctl >/dev/null 2>&1; then
+                systemctl stop xray 2>/dev/null || true
+                systemctl disable xray 2>/dev/null || true
+                rm -f /etc/systemd/system/xray.service
+                systemctl daemon-reload
+            elif command -v rc-service >/dev/null 2>&1; then
+                rc-service xray stop 2>/dev/null || true
+                rc-update del xray default 2>/dev/null || true
+                rm -f /etc/init.d/xray
+            fi
+
+            echo "正在删除核心程序与配置目录..."
+            rm -f /usr/local/bin/xray-core
+            rm -rf /usr/local/etc/xray
+            rm -rf /root/xray_temp
+
+            echo "正在移除管理脚本..."
+            rm -f /usr/local/bin/xray
+
+            echo -e "\033[32m🎉 卸载清理完成！\033[0m"
+            exit 0
+            ;;
+        *)
+            echo -e "\033[33m已取消卸载。\033[0m"
+            sleep 1
+            ;;
+    esac
+}
+
 # 主菜单循环
 while true; do
     clear
@@ -302,15 +338,17 @@ while true; do
     echo " 3. 停止 Xray"
     echo " 4. 查看节点链接及配置"
     echo " 5. 查看实时运行日志"
+    echo " 6. 彻底卸载 Xray"
     echo " 0. 退出菜单"
     echo "=========================================="
-    read -p "请输入选项 [0-5]: " choice
+    read -p "请输入选项 [0-6]: " choice
     case "$choice" in
         1) restart_xray ;;
         2) start_xray ;;
         3) stop_xray ;;
         4) show_info ;;
         5) show_logs ;;
+        6) uninstall_xray ;;
         0) clear; exit 0 ;;
         *) 
             echo -e "\033[31m无效输入，请重新选择！\033[0m"
