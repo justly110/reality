@@ -1,6 +1,6 @@
 #!/bin/bash
-# VLESS-Reality 64M极限低内存优化版 (双引擎适配: Debian & Alpine + 后台管理菜单)
-# 【纯净直连版：去除 WARP 分流，直接通过本机网络出站】
+# VLESS-Reality 64M极限低内存优化版 (双引擎适配: Debian & Alpine + 双栈双节点 + 后台管理菜单)
+# 【双栈纯净直连版：IPv4(30333) + IPv6(30334)】
 
 if [ "$(id -u)" != "0" ]; then
     echo "错误：请使用 root 权限运行"
@@ -46,13 +46,12 @@ echo "⬇️ 正在下载 Xray ${VERSION} ..."
 curl -sL -o /root/xray_temp/xray.zip "https://github.com/XTLS/Xray-core/releases/download/${VERSION}/${ZIP_NAME}"
 
 unzip -q -o /root/xray_temp/xray.zip -d /root/xray_temp/
-# 将核心程序命名为 xray-core，避免与管理命令冲突
 mv -f /root/xray_temp/xray /usr/local/bin/xray-core
 rm -rf /root/xray_temp
 chmod +x /usr/local/bin/xray-core
 
 echo -e "\n====================================="
-echo "3. 正在生成高强度加密凭证..."
+echo "3. 正在生成高强度加密凭证与端口分配..."
 echo "====================================="
 XRAY_BIN="/usr/local/bin/xray-core"
 UUID=$($XRAY_BIN uuid)
@@ -63,53 +62,98 @@ PUBLIC_KEY=$(echo "$KEYS" | awk '/Public/ {print $NF}')
 SHORT_ID=$(openssl rand -hex 8)
 
 DEST_SNI="itunes.apple.com"
-PORT=30333
+PORT_V4=30333
+PORT_V6=30334
+
+# 检查内核是否支持 IPv6
+HAS_IPV6_KERNEL=true
+if [ ! -f /proc/net/if_inet6 ]; then
+    HAS_IPV6_KERNEL=false
+    echo "⚠️ 检测到系统内核已完全禁用 IPv6，将仅启用 IPv4 监听。"
+fi
 
 echo -e "\n====================================="
-echo "4. 正在生成 Xray 配置文件 (纯直连模式)..."
+echo "4. 正在生成 Xray 配置文件 (IPv4 + IPv6)..."
 echo "====================================="
-cat > /usr/local/etc/xray/config.json <<EOF
-{
-  "log": {
-    "loglevel": "warning"
-  },
-  "inbounds": [
+
+# 构建入站配置
+if [ "$HAS_IPV6_KERNEL" = true ]; then
+    INBOUNDS_CONFIG='[
     {
+      "tag": "vless-v4",
       "listen": "0.0.0.0",
-      "port": $PORT,
+      "port": '$PORT_V4',
       "protocol": "vless",
       "settings": {
-        "clients": [
-          {
-            "id": "$UUID",
-            "flow": "xtls-rprx-vision"
-          }
-        ],
+        "clients": [{"id": "'$UUID'", "flow": "xtls-rprx-vision"}],
         "decryption": "none"
       },
       "streamSettings": {
         "network": "tcp",
         "security": "reality",
         "realitySettings": {
-          "dest": "$DEST_SNI:443",
-          "serverNames": [
-            "$DEST_SNI"
-          ],
-          "privateKey": "$PRIVATE_KEY",
-          "shortIds": [
-            "$SHORT_ID"
-          ]
+          "dest": "'$DEST_SNI':443",
+          "serverNames": ["'$DEST_SNI'"],
+          "privateKey": "'$PRIVATE_KEY'",
+          "shortIds": ["'$SHORT_ID'"]
         }
       },
-      "sniffing": {
-        "enabled": true,
-        "destOverride": [
-          "http",
-          "tls"
-        ]
-      }
+      "sniffing": {"enabled": true, "destOverride": ["http", "tls"]}
+    },
+    {
+      "tag": "vless-v6",
+      "listen": "::",
+      "port": '$PORT_V6',
+      "protocol": "vless",
+      "settings": {
+        "clients": [{"id": "'$UUID'", "flow": "xtls-rprx-vision"}],
+        "decryption": "none"
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "security": "reality",
+        "realitySettings": {
+          "dest": "'$DEST_SNI':443",
+          "serverNames": ["'$DEST_SNI'"],
+          "privateKey": "'$PRIVATE_KEY'",
+          "shortIds": ["'$SHORT_ID'"]
+        }
+      },
+      "sniffing": {"enabled": true, "destOverride": ["http", "tls"]}
     }
-  ],
+  ]'
+else
+    INBOUNDS_CONFIG='[
+    {
+      "tag": "vless-v4",
+      "listen": "0.0.0.0",
+      "port": '$PORT_V4',
+      "protocol": "vless",
+      "settings": {
+        "clients": [{"id": "'$UUID'", "flow": "xtls-rprx-vision"}],
+        "decryption": "none"
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "security": "reality",
+        "realitySettings": {
+          "dest": "'$DEST_SNI':443",
+          "serverNames": ["'$DEST_SNI'"],
+          "privateKey": "'$PRIVATE_KEY'",
+          "shortIds": ["'$SHORT_ID'"]
+        }
+      },
+      "sniffing": {"enabled": true, "destOverride": ["http", "tls"]}
+    }
+  ]'
+fi
+
+cat > /usr/local/etc/xray/config.json <<EOF
+{
+  "log": {
+    "loglevel": "warning"
+  },
+  "inbounds": $INBOUNDS_CONFIG,
   "outbounds": [
     {
       "protocol": "freedom",
@@ -176,26 +220,43 @@ EOF
 fi
 
 echo -e "\n====================================="
-echo "6. 生成节点分享链接与管理菜单..."
+echo "6. 获取公网 IP 并生成节点链接..."
 echo "====================================="
-SERVER_IP=$(curl -s -4 ip.sb)
-if [ -z "$SERVER_IP" ]; then
-    SERVER_IP=$(curl -s -4 ifconfig.me)
+# 获取 IPv4
+SERVER_IPV4=$(curl -s4 -m 5 ip.sb 2>/dev/null || curl -s4 -m 5 ifconfig.me 2>/dev/null || curl -s4 -m 5 api.ipify.org 2>/dev/null)
+# 获取 IPv6
+SERVER_IPV6=$(curl -s6 -m 5 ip.sb 2>/dev/null || curl -s6 -m 5 ifconfig.me 2>/dev/null || curl -s6 -m 5 api64.ipify.org 2>/dev/null)
+
+# 生成 IPv4 链接
+if [ -n "$SERVER_IPV4" ]; then
+    NODE_LINK_V4="vless://${UUID}@${SERVER_IPV4}:${PORT_V4}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=chrome&type=tcp&flow=xtls-rprx-vision&sni=${DEST_SNI}&sid=${SHORT_ID}#Reality-IPv4"
+else
+    NODE_LINK_V4="未检测到公网 IPv4，请手动替换 IP: vless://${UUID}@你的IPv4:${PORT_V4}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=chrome&type=tcp&flow=xtls-rprx-vision&sni=${DEST_SNI}&sid=${SHORT_ID}#Reality-IPv4"
 fi
 
-NODE_LINK="vless://${UUID}@${SERVER_IP}:${PORT}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=chrome&type=tcp&flow=xtls-rprx-vision&sni=${DEST_SNI}&sid=${SHORT_ID}#Reality"
+# 生成 IPv6 链接 (客户端规范格式需包裹中括号 [IPv6])
+if [ -n "$SERVER_IPV6" ]; then
+    NODE_LINK_V6="vless://${UUID}@[${SERVER_IPV6}]:${PORT_V6}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=chrome&type=tcp&flow=xtls-rprx-vision&sni=${DEST_SNI}&sid=${SHORT_ID}#Reality-IPv6"
+else
+    NODE_LINK_V6="未检测到公网 IPv6 地址（若机器带有 IPv6，可自行填入 [IPv6] 使用）"
+fi
 
-# 保存节点信息到文件，供管理菜单随时查看
+# 保存节点信息到文件
 cat > /usr/local/etc/xray/link.txt <<EOF
 ==========================================================================
-🎉 VLESS-Reality 节点信息：
+🎉 VLESS-Reality 节点信息 (双栈双节点版)：
 ==========================================================================
-链接：
-${NODE_LINK}
+【1. IPv4 节点】(端口: ${PORT_V4})：
+${NODE_LINK_V4}
 
-详细配置：
-- 地址 (Address)：${SERVER_IP}
-- 端口 (Port)：${PORT}
+--------------------------------------------------------------------------
+【2. IPv6 节点】(端口: ${PORT_V6})：
+${NODE_LINK_V6}
+
+--------------------------------------------------------------------------
+详细参数：
+- IPv4 地址：${SERVER_IPV4:-无} (端口: ${PORT_V4})
+- IPv6 地址：${SERVER_IPV6:-无} (端口: ${PORT_V6})
 - 用户ID (UUID)：${UUID}
 - 流控 (Flow)：xtls-rprx-vision
 - 传输协议 (Network)：tcp
@@ -336,7 +397,7 @@ while true; do
     echo " 1. 重启 Xray"
     echo " 2. 启动 Xray"
     echo " 3. 停止 Xray"
-    echo " 4. 查看节点链接及配置"
+    echo " 4. 查看节点链接及配置 (IPv4 + IPv6)"
     echo " 5. 查看实时运行日志"
     echo " 6. 彻底卸载 Xray"
     echo " 0. 退出菜单"
