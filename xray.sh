@@ -61,7 +61,7 @@ PRIVATE_KEY=$(echo "$KEYS" | awk '/Private/ {print $NF}')
 PUBLIC_KEY=$(echo "$KEYS" | awk '/Public/ {print $NF}')
 SHORT_ID=$(openssl rand -hex 8)
 
-DEST_SNI="itunes.apple.com"
+DEST_SNI=""www.java.com"
 PORT_V4=30333
 PORT_V6=30334
 
