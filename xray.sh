@@ -72,111 +72,89 @@ if [ ! -f /proc/net/if_inet6 ]; then
     echo "⚠️ 检测到系统内核已完全禁用 IPv6，将仅启用 IPv4 监听。"
 fi
 
-# 保存当前变量配置到持久化文件，供管理脚本读取与动态修改
-cat > /usr/local/etc/xray/params.env <<EOF_PARAMS
-PORT_V4="${PORT_V4}"
-PORT_V6="${PORT_V6}"
-DEST_SNI="${DEST_SNI}"
-UUID="${UUID}"
-PUBLIC_KEY="${PUBLIC_KEY}"
-PRIVATE_KEY="${PRIVATE_KEY}"
-SHORT_ID="${SHORT_ID}"
-HAS_IPV6_KERNEL="${HAS_IPV6_KERNEL}"
-EOF_PARAMS
+# 保存变量配置到持久化文件供管理脚本使用
+{
+    echo "PORT_V4=\"$PORT_V4\""
+    echo "PORT_V6=\"$PORT_V6\""
+    echo "DEST_SNI=\"$DEST_SNI\""
+    echo "UUID=\"$UUID\""
+    echo "PUBLIC_KEY=\"$PUBLIC_KEY\""
+    echo "PRIVATE_KEY=\"$PRIVATE_KEY\""
+    echo "SHORT_ID=\"$SHORT_ID\""
+    echo "HAS_IPV6_KERNEL=\"$HAS_IPV6_KERNEL\""
+} > /usr/local/etc/xray/params.env
 
 echo -e "\n====================================="
 echo "4. 正在生成 Xray 配置文件 (IPv4 + IPv6)..."
 echo "====================================="
 
-if [ "$HAS_IPV6_KERNEL" = true ]; then
-    INBOUNDS_CONFIG='[
-    {
-      "tag": "vless-v4",
-      "listen": "0.0.0.0",
-      "port": '$PORT_V4',
-      "protocol": "vless",
-      "settings": {
-        "clients": [{"id": "'$UUID'", "flow": "xtls-rprx-vision"}],
-        "decryption": "none"
-      },
-      "streamSettings": {
-        "network": "tcp",
-        "security": "reality",
-        "realitySettings": {
-          "dest": "'$DEST_SNI':443",
-          "serverNames": ["'$DEST_SNI'"],
-          "privateKey": "'$PRIVATE_KEY'",
-          "shortIds": ["'$SHORT_ID'"]
-        }
-      },
-      "sniffing": {"enabled": true, "destOverride": ["http", "tls"]}
-    },
-    {
-      "tag": "vless-v6",
-      "listen": "::",
-      "port": '$PORT_V6',
-      "protocol": "vless",
-      "settings": {
-        "clients": [{"id": "'$UUID'", "flow": "xtls-rprx-vision"}],
-        "decryption": "none"
-      },
-      "streamSettings": {
-        "network": "tcp",
-        "security": "reality",
-        "realitySettings": {
-          "dest": "'$DEST_SNI':443",
-          "serverNames": ["'$DEST_SNI'"],
-          "privateKey": "'$PRIVATE_KEY'",
-          "shortIds": ["'$SHORT_ID'"]
-        }
-      },
-      "sniffing": {"enabled": true, "destOverride": ["http", "tls"]}
-    }
-  ]'
-else
-    INBOUNDS_CONFIG='[
-    {
-      "tag": "vless-v4",
-      "listen": "0.0.0.0",
-      "port": '$PORT_V4',
-      "protocol": "vless",
-      "settings": {
-        "clients": [{"id": "'$UUID'", "flow": "xtls-rprx-vision"}],
-        "decryption": "none"
-      },
-      "streamSettings": {
-        "network": "tcp",
-        "security": "reality",
-        "realitySettings": {
-          "dest": "'$DEST_SNI':443",
-          "serverNames": ["'$DEST_SNI'"],
-          "privateKey": "'$PRIVATE_KEY'",
-          "shortIds": ["'$SHORT_ID'"]
-        }
-      },
-      "sniffing": {"enabled": true, "destOverride": ["http", "tls"]}
-    }
-  ]'
-fi
+build_inbounds_json() {
+    local p4="$1"
+    local p6="$2"
+    local sni="$3"
+    local uuid="$4"
+    local priv="$5"
+    local sid="$6"
+    local has_v6="$7"
 
-cat > /usr/local/etc/xray/config.json <<EOF_INIT_CONFIG
-{
-  "log": {
-    "loglevel": "warning"
-  },
-  "inbounds": $INBOUNDS_CONFIG,
-  "outbounds": [
-    {
-      "protocol": "freedom",
-      "tag": "direct"
-    },
-    {
-      "protocol": "blackhole",
-      "tag": "block"
-    }
-  ]
+    echo "["
+    echo "  {"
+    echo "    \"tag\": \"vless-v4\","
+    echo "    \"listen\": \"0.0.0.0\","
+    echo "    \"port\": $p4,"
+    echo "    \"protocol\": \"vless\","
+    echo "    \"settings\": {"
+    echo "      \"clients\": [{\"id\": \"$uuid\", \"flow\": \"xtls-rprx-vision\"}],"
+    echo "      \"decryption\": \"none\""
+    echo "    },"
+    echo "    \"streamSettings\": {"
+    echo "      \"network\": \"tcp\","
+    echo "      \"security\": \"reality\","
+    echo "      \"realitySettings\": {"
+    echo "        \"dest\": \"$sni:443\","
+    echo "        \"serverNames\": [\"$sni\"],"
+    echo "        \"privateKey\": \"$priv\","
+    echo "        \"shortIds\": [\"$sid\"]"
+    echo "      }"
+    echo "    },"
+    echo "    \"sniffing\": {\"enabled\": true, \"destOverride\": [\"http\", \"tls\"]}"
+    echo "  }"
+    if [ "$has_v6" = "true" ]; then
+        echo "  ,{"
+        echo "    \"tag\": \"vless-v6\","
+        echo "    \"listen\": \"::\","
+        echo "    \"port\": $p6,"
+        echo "    \"protocol\": \"vless\","
+        echo "    \"settings\": {"
+        echo "      \"clients\": [{\"id\": \"$uuid\", \"flow\": \"xtls-rprx-vision\"}],"
+        echo "      \"decryption\": \"none\""
+        echo "    },"
+        echo "    \"streamSettings\": {"
+        echo "      \"network\": \"tcp\","
+        echo "      \"security\": \"reality\","
+        echo "      \"realitySettings\": {"
+        echo "        \"dest\": \"$sni:443\","
+        echo "        \"serverNames\": [\"$sni\"],"
+        echo "        \"privateKey\": \"$priv\","
+        echo "        \"shortIds\": [\"$sid\"]"
+        echo "      }"
+        echo "    },"
+        echo "    \"sniffing\": {\"enabled\": true, \"destOverride\": [\"http\", \"tls\"]}"
+        echo "  }"
+    fi
+    echo "]"
 }
-EOF_INIT_CONFIG
+
+{
+    echo "{"
+    echo '  "log": {"loglevel": "warning"},'
+    echo "  \"inbounds\": $(build_inbounds_json "$PORT_V4" "$PORT_V6" "$DEST_SNI" "$UUID" "$PRIVATE_KEY" "$SHORT_ID" "$HAS_IPV6_KERNEL"),"
+    echo '  "outbounds": ['
+    echo '    {"protocol": "freedom", "tag": "direct"},'
+    echo '    {"protocol": "blackhole", "tag": "block"}'
+    echo '  ]'
+    echo "}"
+} > /usr/local/etc/xray/config.json
 
 echo -e "\n====================================="
 echo "5. 配置系统服务并限制内存..."
@@ -248,32 +226,32 @@ else
     NODE_LINK_V6="未检测到公网 IPv6 地址（若机器带有 IPv6，可自行填入 [IPv6] 使用）"
 fi
 
-cat > /usr/local/etc/xray/link.txt <<EOF_INIT_LINK
-==========================================================================
-🎉 VLESS-Reality 节点信息 (双栈双节点版)：
-==========================================================================
-【1. IPv4 节点】(端口: ${PORT_V4})：
-${NODE_LINK_V4}
+{
+    echo "=========================================================================="
+    echo "🎉 VLESS-Reality 节点信息 (双栈双节点版)："
+    echo "=========================================================================="
+    echo "【1. IPv4 节点】(端口: ${PORT_V4})："
+    echo "${NODE_LINK_V4}"
+    echo ""
+    echo "--------------------------------------------------------------------------"
+    echo "【2. IPv6 节点】(端口: ${PORT_V6})："
+    echo "${NODE_LINK_V6}"
+    echo ""
+    echo "--------------------------------------------------------------------------"
+    echo "详细参数："
+    echo "- IPv4 地址：${SERVER_IPV4:-无} (端口: ${PORT_V4})"
+    echo "- IPv6 地址：${SERVER_IPV6:-无} (端口: ${PORT_V6})"
+    echo "- 用户ID (UUID)：${UUID}"
+    echo "- 流控 (Flow)：xtls-rprx-vision"
+    echo "- 传输协议 (Network)：tcp"
+    echo "- 伪装域名 (SNI)：${DEST_SNI}"
+    echo "- 公钥 (pbk)：${PUBLIC_KEY}"
+    echo "- ShortId：${SHORT_ID}"
+    echo "=========================================================================="
+} > /usr/local/etc/xray/link.txt
 
---------------------------------------------------------------------------
-【2. IPv6 节点】(端口: ${PORT_V6})：
-${NODE_LINK_V6}
-
---------------------------------------------------------------------------
-详细参数：
-- IPv4 地址：${SERVER_IPV4:-无} (端口: ${PORT_V4})
-- IPv6 地址：${SERVER_IPV6:-无} (端口: ${PORT_V6})
-- 用户ID (UUID)：${UUID}
-- 流控 (Flow)：xtls-rprx-vision
-- 传输协议 (Network)：tcp
-- 伪装域名 (SNI)：${DEST_SNI}
-- 公钥 (pbk)：${PUBLIC_KEY}
-- ShortId：${SHORT_ID}
-==========================================================================
-EOF_INIT_LINK
-
-# 生成后台独立管理命令 /usr/local/bin/xray
-cat > /usr/local/bin/xray << 'EOF_XRAY_SCRIPT'
+# 注入 /usr/local/bin/xray 管理工具 (完全无嵌套 Here-Doc 架构)
+cat > /usr/local/bin/xray << 'EOF_MANAGEMENT_SCRIPT'
 #!/bin/bash
 
 ENV_FILE="/usr/local/etc/xray/params.env"
@@ -314,109 +292,89 @@ do_restart() {
     fi
 }
 
+render_inbounds() {
+    local p4="$1"
+    local p6="$2"
+    local sni="$3"
+    local uuid="$4"
+    local priv="$5"
+    local sid="$6"
+    local has_v6="$7"
+
+    echo "["
+    echo "  {"
+    echo "    \"tag\": \"vless-v4\","
+    echo "    \"listen\": \"0.0.0.0\","
+    echo "    \"port\": $p4,"
+    echo "    \"protocol\": \"vless\","
+    echo "    \"settings\": {"
+    echo "      \"clients\": [{\"id\": \"$uuid\", \"flow\": \"xtls-rprx-vision\"}],"
+    echo "      \"decryption\": \"none\""
+    echo "    },"
+    echo "    \"streamSettings\": {"
+    echo "      \"network\": \"tcp\","
+    echo "      \"security\": \"reality\","
+    echo "      \"realitySettings\": {"
+    echo "        \"dest\": \"$sni:443\","
+    echo "        \"serverNames\": [\"$sni\"],"
+    echo "        \"privateKey\": \"$priv\","
+    echo "        \"shortIds\": [\"$sid\"]"
+    echo "      }"
+    echo "    },"
+    echo "    \"sniffing\": {\"enabled\": true, \"destOverride\": [\"http\", \"tls\"]}"
+    echo "  }"
+    if [ "$has_v6" = "true" ]; then
+        echo "  ,{"
+        echo "    \"tag\": \"vless-v6\","
+        echo "    \"listen\": \"::\","
+        echo "    \"port\": $p6,"
+        echo "    \"protocol\": \"vless\","
+        echo "    \"settings\": {"
+        echo "      \"clients\": [{\"id\": \"$uuid\", \"flow\": \"xtls-rprx-vision\"}],"
+        echo "      \"decryption\": \"none\""
+        echo "    },"
+        echo "    \"streamSettings\": {"
+        echo "      \"network\": \"tcp\","
+        echo "      \"security\": \"reality\","
+        echo "      \"realitySettings\": {"
+        echo "        \"dest\": \"$sni:443\","
+        echo "        \"serverNames\": [\"$sni\"],"
+        echo "        \"privateKey\": \"$priv\","
+        echo "        \"shortIds\": [\"$sid\"]"
+        echo "      }"
+        echo "    },"
+        echo "    \"sniffing\": {\"enabled\": true, \"destOverride\": [\"http\", \"tls\"]}"
+        echo "  }"
+    fi
+    echo "]"
+}
+
 rebuild_and_apply() {
     echo -e "\n⏳ 正在更新配置并重启 Xray..."
-    local inbounds=""
-    if [ "$HAS_IPV6_KERNEL" = "true" ]; then
-        inbounds='[
-        {
-          "tag": "vless-v4",
-          "listen": "0.0.0.0",
-          "port": '$PORT_V4',
-          "protocol": "vless",
-          "settings": {
-            "clients": [{"id": "'$UUID'", "flow": "xtls-rprx-vision"}],
-            "decryption": "none"
-          },
-          "streamSettings": {
-            "network": "tcp",
-            "security": "reality",
-            "realitySettings": {
-              "dest": "'$DEST_SNI':443",
-              "serverNames": ["'$DEST_SNI'"],
-              "privateKey": "'$PRIVATE_KEY'",
-              "shortIds": ["'$SHORT_ID'"]
-            }
-          },
-          "sniffing": {"enabled": true, "destOverride": ["http", "tls"]}
-        },
-        {
-          "tag": "vless-v6",
-          "listen": "::",
-          "port": '$PORT_V6',
-          "protocol": "vless",
-          "settings": {
-            "clients": [{"id": "'$UUID'", "flow": "xtls-rprx-vision"}],
-            "decryption": "none"
-          },
-          "streamSettings": {
-            "network": "tcp",
-            "security": "reality",
-            "realitySettings": {
-              "dest": "'$DEST_SNI':443",
-              "serverNames": ["'$DEST_SNI'"],
-              "privateKey": "'$PRIVATE_KEY'",
-              "shortIds": ["'$SHORT_ID'"]
-            }
-          },
-          "sniffing": {"enabled": true, "destOverride": ["http", "tls"]}
-        }
-      ]'
-    else
-        inbounds='[
-        {
-          "tag": "vless-v4",
-          "listen": "0.0.0.0",
-          "port": '$PORT_V4',
-          "protocol": "vless",
-          "settings": {
-            "clients": [{"id": "'$UUID'", "flow": "xtls-rprx-vision"}],
-            "decryption": "none"
-          },
-          "streamSettings": {
-            "network": "tcp",
-            "security": "reality",
-            "realitySettings": {
-              "dest": "'$DEST_SNI':443",
-              "serverNames": ["'$DEST_SNI'"],
-              "privateKey": "'$PRIVATE_KEY'",
-              "shortIds": ["'$SHORT_ID'"]
-            }
-          },
-          "sniffing": {"enabled": true, "destOverride": ["http", "tls"]}
-        }
-      ]'
-    fi
 
-    cat > "$CONFIG_FILE" <<EOF_JSON
-{
-  "log": {
-    "loglevel": "warning"
-  },
-  "inbounds": $inbounds,
-  "outbounds": [
+    # 重构 config.json
     {
-      "protocol": "freedom",
-      "tag": "direct"
-    },
-    {
-      "protocol": "blackhole",
-      "tag": "block"
-    }
-  ]
-}
-EOF_JSON
+        echo "{"
+        echo '  "log": {"loglevel": "warning"},'
+        echo "  \"inbounds\": $(render_inbounds "$PORT_V4" "$PORT_V6" "$DEST_SNI" "$UUID" "$PRIVATE_KEY" "$SHORT_ID" "$HAS_IPV6_KERNEL"),"
+        echo '  "outbounds": ['
+        echo '    {"protocol": "freedom", "tag": "direct"},'
+        echo '    {"protocol": "blackhole", "tag": "block"}'
+        echo '  ]'
+        echo "}"
+    } > "$CONFIG_FILE"
 
-    cat > "$ENV_FILE" <<EOF_ENV
-PORT_V4="${PORT_V4}"
-PORT_V6="${PORT_V6}"
-DEST_SNI="${DEST_SNI}"
-UUID="${UUID}"
-PUBLIC_KEY="${PUBLIC_KEY}"
-PRIVATE_KEY="${PRIVATE_KEY}"
-SHORT_ID="${SHORT_ID}"
-HAS_IPV6_KERNEL="${HAS_IPV6_KERNEL}"
-EOF_ENV
+    # 写回参数文件
+    {
+        echo "PORT_V4=\"$PORT_V4\""
+        echo "PORT_V6=\"$PORT_V6\""
+        echo "DEST_SNI=\"$DEST_SNI\""
+        echo "UUID=\"$UUID\""
+        echo "PUBLIC_KEY=\"$PUBLIC_KEY\""
+        echo "PRIVATE_KEY=\"$PRIVATE_KEY\""
+        echo "SHORT_ID=\"$SHORT_ID\""
+        echo "HAS_IPV6_KERNEL=\"$HAS_IPV6_KERNEL\""
+    } > "$ENV_FILE"
 
     do_restart
     sleep 1
@@ -440,29 +398,30 @@ EOF_ENV
         link_v6="未检测到公网 IPv6 地址"
     fi
 
-    cat > "$LINK_FILE" <<EOF_LINK
-==========================================================================
-🎉 VLESS-Reality 最新节点信息：
-==========================================================================
-【1. IPv4 节点】(端口: ${PORT_V4})：
-${link_v4}
+    {
+        echo "=========================================================================="
+        echo "🎉 VLESS-Reality 最新节点信息："
+        echo "=========================================================================="
+        echo "【1. IPv4 节点】(端口: ${PORT_V4})："
+        echo "${link_v4}"
+        echo ""
+        echo "--------------------------------------------------------------------------"
+        echo "【2. IPv6 节点】(端口: ${PORT_V6})："
+        echo "${link_v6}"
+        echo ""
+        echo "--------------------------------------------------------------------------"
+        echo "详细参数："
+        echo "- IPv4 地址：${s_v4:-无} (端口: ${PORT_V4})"
+        echo "- IPv6 地址：${s_v6:-无} (端口: ${PORT_V6})"
+        echo "- 用户ID (UUID)：${UUID}"
+        echo "- 流控 (Flow)：xtls-rprx-vision"
+        echo "- 传输协议 (Network)：tcp"
+        echo "- 伪装域名 (SNI)：${DEST_SNI}"
+        echo "- 公钥 (pbk)：${PUBLIC_KEY}"
+        echo "- ShortId：${SHORT_ID}"
+        echo "=========================================================================="
+    } > "$LINK_FILE"
 
---------------------------------------------------------------------------
-【2. IPv6 节点】(端口: ${PORT_V6})：
-${link_v6}
-
---------------------------------------------------------------------------
-详细参数：
-- IPv4 地址：${s_v4:-无} (端口: ${PORT_V4})
-- IPv6 地址：${s_v6:-无} (端口: ${PORT_V6})
-- 用户ID (UUID)：${UUID}
-- 流控 (Flow)：xtls-rprx-vision
-- 传输协议 (Network)：tcp
-- 伪装域名 (SNI)：${DEST_SNI}
-- 公钥 (pbk)：${PUBLIC_KEY}
-- ShortId：${SHORT_ID}
-==========================================================================
-EOF_LINK
     clear
     echo -e "\033[32m✔ 配置已更新并成功重启服务！\033[0m\n"
     cat "$LINK_FILE"
@@ -480,10 +439,10 @@ modify_config() {
         echo " 1. 修改 IPv4 监听端口 (当前: $PORT_V4)"
         echo " 2. 修改 IPv6 监听端口 (当前: $PORT_V6)"
         echo " 3. 修改 Reality 伪装域名 (SNI) (当前: $DEST_SNI)"
-        echo " 4. 重新生成 UUID (更换用户ID凭证)"
+        echo " 4. 重新生成 UUID (更换用户凭证)"
         echo " 5. 重新生成 Reality 密钥对(Keypair)及 ShortID"
         echo " 6. 批量修改 (IPv4端口 + IPv6端口 + SNI)"
-        echo " 0. 返回上级菜单"
+        echo " 0. 返回主菜单"
         echo "=========================================="
         read -p "请输入选项 [0-6]: " opt
         case "$opt" in
@@ -673,7 +632,7 @@ while true; do
             ;;
     esac
 done
-EOF_XRAY_SCRIPT
+EOF_MANAGEMENT_SCRIPT
 
 chmod +x /usr/local/bin/xray
 
