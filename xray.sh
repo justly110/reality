@@ -1,6 +1,6 @@
 #!/bin/bash
 # VLESS-Reality 64M极限低内存优化版 (双引擎适配: Debian & Alpine + 双栈双节点 + 后台管理菜单)
-# 【双栈纯净直连版：IPv4(30333) + IPv6(30334)】
+# 【双栈纯净直连版：IPv4(443) + IPv6(443)】
 
 if [ "$(id -u)" != "0" ]; then
     echo "错误：请使用 root 权限运行"
@@ -24,7 +24,7 @@ fi
 mkdir -p /usr/local/bin /usr/local/etc/xray /root/xray_temp
 
 echo -e "\n====================================="
-echo "2. 极限低内存模式：开始部署 Xray..."
+echo "2. 开始部署 Xray..."
 echo "====================================="
 MACHINE=$(uname -m)
 if [ "$MACHINE" = "x86_64" ]; then
@@ -62,8 +62,8 @@ PUBLIC_KEY=$(echo "$KEYS" | awk '/Public/ {print $NF}')
 SHORT_ID=$(openssl rand -hex 8)
 
 DEST_SNI="www.java.com"
-PORT_V4=30333
-PORT_V6=30334
+PORT_V4=443
+PORT_V6=443
 
 # 检查内核是否支持 IPv6
 HAS_IPV6_KERNEL=true
@@ -166,9 +166,9 @@ Description=Xray Service
 After=network.target nss-lookup.target
 
 [Service]
-Environment="GOGC=20"
-Environment="GOMEMLIMIT=30MiB"
-Environment="GODEBUG=madvdontneed=1"
+# Environment="GOGC=20"
+# Environment="GOMEMLIMIT=30MiB"
+# Environment="GODEBUG=madvdontneed=1"
 ExecStart=/usr/local/bin/xray-core run -config /usr/local/etc/xray/config.json
 Restart=on-failure
 RestartPreventExitStatus=23
@@ -193,9 +193,9 @@ command_args="run -c /usr/local/etc/xray/config.json"
 command_background="yes"
 pidfile="/var/run/${RC_SVCNAME}.pid"
 
-export GOGC=20
-export GOMEMLIMIT=30MiB
-export GODEBUG=madvdontneed=1
+# export GOGC=20
+# export GOMEMLIMIT=30MiB
+# export GODEBUG=madvdontneed=1
 
 depend() {
     need net
