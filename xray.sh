@@ -1,5 +1,5 @@
 #!/bin/bash
-# VLESS-Reality 低内存优化版 (双系统适配: Debian & Alpine + v4/v6双栈双节点 + xray运行后台管理菜单)
+# VLESS-Reality 标准443版 (双系统适配: Debian & Alpine + v4/v6双栈双节点 + xray运行后台管理菜单)
 # 【双栈纯净直连版：IPv4(443) + IPv6(443)】
 
 if [ "$(id -u)" != "0" ]; then
@@ -157,7 +157,7 @@ build_inbounds_json() {
 } > /usr/local/etc/xray/config.json
 
 echo -e "\n====================================="
-echo "5. 配置系统服务并限制内存..."
+echo "5. 配置系统服务..."
 echo "====================================="
 if command -v systemctl >/dev/null 2>&1; then
     cat > /etc/systemd/system/xray.service << 'EOF_SYSTEMD'
@@ -166,9 +166,6 @@ Description=Xray Service
 After=network.target nss-lookup.target
 
 [Service]
-# Environment="GOGC=20"
-# Environment="GOMEMLIMIT=30MiB"
-# Environment="GODEBUG=madvdontneed=1"
 ExecStart=/usr/local/bin/xray-core run -config /usr/local/etc/xray/config.json
 Restart=on-failure
 RestartPreventExitStatus=23
@@ -192,10 +189,6 @@ command="/usr/local/bin/xray-core"
 command_args="run -c /usr/local/etc/xray/config.json"
 command_background="yes"
 pidfile="/var/run/${RC_SVCNAME}.pid"
-
-# export GOGC=20
-# export GOMEMLIMIT=30MiB
-# export GODEBUG=madvdontneed=1
 
 depend() {
     need net
