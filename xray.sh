@@ -1,5 +1,5 @@
 #!/bin/bash
-# VLESS-Reality 64M极限低内存优化版 (双引擎适配: Debian & Alpine + 双栈双节点 + 后台管理菜单)
+# VLESS-Reality 低内存优化版 (双系统适配: Debian & Alpine + v4/v6双栈双节点 + xray运行后台管理菜单)
 # 【双栈纯净直连版：IPv4(443) + IPv6(443)】
 
 if [ "$(id -u)" != "0" ]; then
@@ -61,7 +61,7 @@ PRIVATE_KEY=$(echo "$KEYS" | awk '/Private/ {print $NF}')
 PUBLIC_KEY=$(echo "$KEYS" | awk '/Public/ {print $NF}')
 SHORT_ID=$(openssl rand -hex 8)
 
-DEST_SNI="www.java.com"
+DEST_SNI="addons.mozilla.org"
 PORT_V4=443
 PORT_V6=443
 
