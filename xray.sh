@@ -1,5 +1,5 @@
 #!/bin/bash
-# VLESS-Reality 分流中转版 (Debian & Alpine + 纯IPv4单栈 + 本机/落地双用户分流 + 细粒度后台管理)
+# VLESS-Reality 纯净单节点版 (Debian & Alpine + 纯IPv4单栈 + 后台管理)
 
 if [ "$(id -u)" != "0" ]; then
     echo "错误：请使用 root 权限运行"
@@ -47,27 +47,11 @@ rm -rf /root/xray_temp
 chmod +x /usr/local/bin/xray-core
 
 echo -e "\n====================================="
-echo "3. 配置落地机 Shadowsocks 转发参数..."
-echo "====================================="
-echo "说明：通过【落地转发】节点连接的流量，将由本机转发至该 Shadowsocks 落地服务器。"
-read -p "请输入落地机 IP / 域名 (留空则预留占位符): " INPUT_SS_ADDR
-read -p "请输入落地机 SS 端口 (默认 30333): " INPUT_SS_PORT
-read -p "请输入落地机 SS 密码 (留空则预留占位符): " INPUT_SS_PASS
-
-SS_ADDR="${INPUT_SS_ADDR:-127.0.0.1}"
-SS_PORT="${INPUT_SS_PORT:-30333}"
-SS_PASS="${INPUT_SS_PASS:-YOUR_SS_PASSWORD_HERE}"
-SS_METHOD="2022-blake3-aes-128-gcm"
-
-echo -e "\n====================================="
-echo "4. 正在生成加密凭证与分配用户 UUID..."
+echo "3. 正在生成加密凭证与分配用户 UUID..."
 echo "====================================="
 XRAY_BIN="/usr/local/bin/xray-core"
 
-# 分别生成本机直连与落地转发的 UUID
-UUID_DIRECT=$($XRAY_BIN uuid)
-UUID_RELAY=$($XRAY_BIN uuid)
-
+UUID=$($XRAY_BIN uuid)
 KEYS=$($XRAY_BIN x25519)
 PRIVATE_KEY=$(echo "$KEYS" | awk '/Private/ {print $NF}')
 PUBLIC_KEY=$(echo "$KEYS" | awk '/Public/ {print $NF}')
@@ -80,28 +64,22 @@ PORT=443
 {
     echo "PORT=\"$PORT\""
     echo "DEST_SNI=\"$DEST_SNI\""
-    echo "UUID_DIRECT=\"$UUID_DIRECT\""
-    echo "UUID_RELAY=\"$UUID_RELAY\""
+    echo "UUID=\"$UUID\""
     echo "PUBLIC_KEY=\"$PUBLIC_KEY\""
     echo "PRIVATE_KEY=\"$PRIVATE_KEY\""
     echo "SHORT_ID=\"$SHORT_ID\""
-    echo "SS_ADDR=\"$SS_ADDR\""
-    echo "SS_PORT=\"$SS_PORT\""
-    echo "SS_PASS=\"$SS_PASS\""
-    echo "SS_METHOD=\"$SS_METHOD\""
 } > /usr/local/etc/xray/params.env
 
 echo -e "\n====================================="
-echo "5. 正在生成 Xray 配置文件..."
+echo "4. 正在生成 Xray 配置文件..."
 echo "====================================="
 
 build_inbounds_json() {
     local port="$1"
     local sni="$2"
-    local u_direct="$3"
-    local u_relay="$4"
-    local priv="$5"
-    local sid="$6"
+    local uid="$3"
+    local priv="$4"
+    local sid="$5"
 
     cat << EOF
 [
@@ -112,8 +90,7 @@ build_inbounds_json() {
     "protocol": "vless",
     "settings": {
       "clients": [
-        {"id": "$u_direct", "flow": "xtls-rprx-vision", "email": "direct-local"},
-        {"id": "$u_relay", "flow": "xtls-rprx-vision", "email": "relay-egress"}
+        {"id": "$uid", "flow": "xtls-rprx-vision"}
       ],
       "decryption": "none"
     },
@@ -136,57 +113,16 @@ EOF
 {
     echo "{"
     echo '  "log": {"loglevel": "warning"},'
-    echo "  \"inbounds\": $(build_inbounds_json "$PORT" "$DEST_SNI" "$UUID_DIRECT" "$UUID_RELAY" "$PRIVATE_KEY" "$SHORT_ID"),"
+    echo "  \"inbounds\": $(build_inbounds_json "$PORT" "$DEST_SNI" "$UUID" "$PRIVATE_KEY" "$SHORT_ID"),"
     echo '  "outbounds": ['
     echo '    {"protocol": "freedom", "tag": "direct"},'
-    echo '    {"protocol": "blackhole", "tag": "block"},'
-    echo '    {'
-    echo '      "tag": "to-egress-ss",'
-    echo '      "protocol": "shadowsocks",'
-    echo '      "settings": {'
-    echo '        "servers": ['
-    echo '          {'
-    echo "            \"address\": \"$SS_ADDR\","
-    echo "            \"port\": $SS_PORT,"
-    echo "            \"method\": \"$SS_METHOD\","
-    echo "            \"password\": \"$SS_PASS\""
-    echo '          }'
-    echo '        ]'
-    echo '      },'
-    echo '      "streamSettings": {'
-    echo '        "network": "tcp"'
-    echo '      },'
-    echo '      "mux": {'
-    echo '        "enabled": true,'
-    echo '        "concurrency": 8'
-    echo '      }'
-    echo '    }'
-    echo '  ],'
-    echo '  "routing": {'
-    echo '    "domainStrategy": "IPIfNonMatch",'
-    echo '    "rules": ['
-    echo '      {'
-    echo '        "type": "field",'
-    echo '        "user": ["relay-egress"],'
-    echo '        "outboundTag": "to-egress-ss"'
-    echo '      },'
-    echo '      {'
-    echo '        "type": "field",'
-    echo '        "user": ["direct-local"],'
-    echo '        "outboundTag": "direct"'
-    echo '      },'
-    echo '      {'
-    echo '        "type": "field",'
-    echo '        "network": "tcp,udp",'
-    echo '        "outboundTag": "direct"'
-    echo '      }'
-    echo '    ]'
-    echo '  }'
+    echo '    {"protocol": "blackhole", "tag": "block"}'
+    echo '  ]'
     echo "}"
 } > /usr/local/etc/xray/config.json
 
 echo -e "\n====================================="
-echo "6. 配置系统服务..."
+echo "5. 配置系统服务..."
 echo "====================================="
 if command -v systemctl >/dev/null 2>&1; then
     cat > /etc/systemd/system/xray.service << 'EOF_SYSTEMD'
@@ -231,26 +167,18 @@ EOF_OPENRC
 fi
 
 echo -e "\n====================================="
-echo "7. 获取公网 IPv4 并生成节点链接..."
+echo "6. 获取公网 IPv4 并生成节点链接..."
 echo "====================================="
 SERVER_IPV4=$(curl -s4 -m 5 ip.sb 2>/dev/null || curl -s4 -m 5 ifconfig.me 2>/dev/null || curl -s4 -m 5 api.ipify.org 2>/dev/null)
 HOST_V4="${SERVER_IPV4:-你的本机IPv4}"
 
-# 节点链接 - 本机直连 (direct-local)
-LINK_DIRECT="vless://${UUID_DIRECT}@${HOST_V4}:${PORT}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=chrome&type=tcp&flow=xtls-rprx-vision&sni=${DEST_SNI}&sid=${SHORT_ID}#Reality-本机直连"
-
-# 节点链接 - 落地机转发 (relay-egress)
-LINK_RELAY="vless://${UUID_RELAY}@${HOST_V4}:${PORT}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=chrome&type=tcp&flow=xtls-rprx-vision&sni=${DEST_SNI}&sid=${SHORT_ID}#Reality-落地转发"
+LINK="vless://${UUID}@${HOST_V4}:${PORT}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=chrome&type=tcp&flow=xtls-rprx-vision&sni=${DEST_SNI}&sid=${SHORT_ID}#Reality-Node"
 
 {
     echo "=========================================================================="
-    echo "🎉 VLESS-Reality 分流节点配置已就绪"
+    echo "🎉 VLESS-Reality 节点配置已就绪"
     echo "=========================================================================="
-    echo "【节点 1：本机直连 (direct-local)】"
-    echo "● 节点链接: ${LINK_DIRECT}"
-    echo ""
-    echo "【节点 2：落地转发 (relay-egress -> Shadowsocks)】"
-    echo "● 节点链接: ${LINK_RELAY}"
+    echo "● 节点链接: ${LINK}"
     echo "--------------------------------------------------------------------------"
     echo "详细参数："
     echo "- 本机 IPv4: ${SERVER_IPV4:-未检测到 (需手动替换)}"
@@ -258,13 +186,7 @@ LINK_RELAY="vless://${UUID_RELAY}@${HOST_V4}:${PORT}?security=reality&encryption
     echo "- 伪装域名 (SNI): ${DEST_SNI}"
     echo "- 公钥 (pbk): ${PUBLIC_KEY}"
     echo "- ShortId: ${SHORT_ID}"
-    echo "- 本机直连 UUID: ${UUID_DIRECT}"
-    echo "- 落地转发 UUID: ${UUID_RELAY}"
-    echo "--------------------------------------------------------------------------"
-    echo "落地机 Shadowsocks 配置："
-    echo "- 落地地址: ${SS_ADDR}:${SS_PORT}"
-    echo "- 加密方式: ${SS_METHOD}"
-    echo "- 落地密码: ${SS_PASS}"
+    echo "- 用户 UUID: ${UUID}"
     echo "=========================================================================="
 } > /usr/local/etc/xray/link.txt
 
@@ -313,10 +235,9 @@ do_restart() {
 render_inbounds() {
     local port="$1"
     local sni="$2"
-    local u_direct="$3"
-    local u_relay="$4"
-    local priv="$5"
-    local sid="$6"
+    local uid="$3"
+    local priv="$4"
+    local sid="$5"
 
     cat << EOF
 [
@@ -327,8 +248,7 @@ render_inbounds() {
     "protocol": "vless",
     "settings": {
       "clients": [
-        {"id": "$u_direct", "flow": "xtls-rprx-vision", "email": "direct-local"},
-        {"id": "$u_relay", "flow": "xtls-rprx-vision", "email": "relay-egress"}
+        {"id": "$uid", "flow": "xtls-rprx-vision"}
       ],
       "decryption": "none"
     },
@@ -355,52 +275,11 @@ rebuild_and_apply() {
     {
         echo "{"
         echo '  "log": {"loglevel": "warning"},'
-        echo "  \"inbounds\": $(render_inbounds "$PORT" "$DEST_SNI" "$UUID_DIRECT" "$UUID_RELAY" "$PRIVATE_KEY" "$SHORT_ID"),"
+        echo "  \"inbounds\": $(render_inbounds "$PORT" "$DEST_SNI" "$UUID" "$PRIVATE_KEY" "$SHORT_ID"),"
         echo '  "outbounds": ['
         echo '    {"protocol": "freedom", "tag": "direct"},'
-        echo '    {"protocol": "blackhole", "tag": "block"},'
-        echo '    {'
-        echo '      "tag": "to-egress-ss",'
-        echo '      "protocol": "shadowsocks",'
-        echo '      "settings": {'
-        echo '        "servers": ['
-        echo '          {'
-        echo "            \"address\": \"$SS_ADDR\","
-        echo "            \"port\": $SS_PORT,"
-        echo "            \"method\": \"$SS_METHOD\","
-        echo "            \"password\": \"$SS_PASS\""
-        echo '          }'
-        echo '        ]'
-        echo '      },'
-        echo '      "streamSettings": {'
-        echo '        "network": "tcp"'
-        echo '      },'
-        echo '      "mux": {'
-        echo '        "enabled": true,'
-        echo '        "concurrency": 8'
-        echo '      }'
-        echo '    }'
-        echo '  ],'
-        echo '  "routing": {'
-        echo '    "domainStrategy": "IPIfNonMatch",'
-        echo '    "rules": ['
-        echo '      {'
-        echo '        "type": "field",'
-        echo '        "user": ["relay-egress"],'
-        echo '        "outboundTag": "to-egress-ss"'
-        echo '      },'
-        echo '      {'
-        echo '        "type": "field",'
-        echo '        "user": ["direct-local"],'
-        echo '        "outboundTag": "direct"'
-        echo '      },'
-        echo '      {'
-        echo '        "type": "field",'
-        echo '        "network": "tcp,udp",'
-        echo '        "outboundTag": "direct"'
-        echo '      }'
-        echo '    ]'
-        echo '  }'
+        echo '    {"protocol": "blackhole", "tag": "block"}'
+        echo '  ]'
         echo "}"
     } > "$CONFIG_FILE"
 
@@ -408,15 +287,10 @@ rebuild_and_apply() {
     {
         echo "PORT=\"$PORT\""
         echo "DEST_SNI=\"$DEST_SNI\""
-        echo "UUID_DIRECT=\"$UUID_DIRECT\""
-        echo "UUID_RELAY=\"$UUID_RELAY\""
+        echo "UUID=\"$UUID\""
         echo "PUBLIC_KEY=\"$PUBLIC_KEY\""
         echo "PRIVATE_KEY=\"$PRIVATE_KEY\""
         echo "SHORT_ID=\"$SHORT_ID\""
-        echo "SS_ADDR=\"$SS_ADDR\""
-        echo "SS_PORT=\"$SS_PORT\""
-        echo "SS_PASS=\"$SS_PASS\""
-        echo "SS_METHOD=\"$SS_METHOD\""
     } > "$ENV_FILE"
 
     do_restart
@@ -426,18 +300,13 @@ rebuild_and_apply() {
     local s_v4=$(curl -s4 -m 5 ip.sb 2>/dev/null || curl -s4 -m 5 ifconfig.me 2>/dev/null || curl -s4 -m 5 api.ipify.org 2>/dev/null)
     local host_v4="${s_v4:-你的本机IPv4}"
 
-    local l_direct="vless://${UUID_DIRECT}@${host_v4}:${PORT}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=chrome&type=tcp&flow=xtls-rprx-vision&sni=${DEST_SNI}&sid=${SHORT_ID}#Reality-本机直连"
-    local l_relay="vless://${UUID_RELAY}@${host_v4}:${PORT}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=chrome&type=tcp&flow=xtls-rprx-vision&sni=${DEST_SNI}&sid=${SHORT_ID}#Reality-落地转发"
+    local l_direct="vless://${UUID}@${host_v4}:${PORT}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=chrome&type=tcp&flow=xtls-rprx-vision&sni=${DEST_SNI}&sid=${SHORT_ID}#Reality-Node"
 
     {
         echo "=========================================================================="
         echo "🎉 VLESS-Reality 最新节点信息"
         echo "=========================================================================="
-        echo "【节点 1：本机直连 (direct-local)】"
         echo "● 节点链接: ${l_direct}"
-        echo ""
-        echo "【节点 2：落地转发 (relay-egress -> Shadowsocks)】"
-        echo "● 节点链接: ${l_relay}"
         echo "--------------------------------------------------------------------------"
         echo "详细参数："
         echo "- 本机 IPv4: ${s_v4:-未检测到 (需手动替换)}"
@@ -445,13 +314,7 @@ rebuild_and_apply() {
         echo "- 伪装域名 (SNI): ${DEST_SNI}"
         echo "- 公钥 (pbk): ${PUBLIC_KEY}"
         echo "- ShortId: ${SHORT_ID}"
-        echo "- 本机直连 UUID: ${UUID_DIRECT}"
-        echo "- 落地转发 UUID: ${UUID_RELAY}"
-        echo "--------------------------------------------------------------------------"
-        echo "落地机 Shadowsocks 配置："
-        echo "- 落地地址: ${SS_ADDR}:${SS_PORT}"
-        echo "- 加密方式: ${SS_METHOD}"
-        echo "- 落地密码: ${SS_PASS}"
+        echo "- 用户 UUID: ${UUID}"
         echo "=========================================================================="
     } > "$LINK_FILE"
 
@@ -469,26 +332,15 @@ modify_config() {
         echo "=========================================="
         echo "           修改 Xray 节点配置             "
         echo "=========================================="
-        echo " [基础 Reality 设置]"
         echo " 1. 修改 Reality 端口 (当前: $PORT)"
         echo " 2. 修改 Reality 伪装域名 SNI (当前: $DEST_SNI)"
         echo " 3. 重新生成 Reality 密钥对(Keypair)及 ShortID"
-        echo "------------------------------------------"
-        echo " [用户 UUID 管理 (独立修改)]"
-        echo " 4. 重新生成【本机直连】UUID"
-        echo " 5. 重新生成【落地转发】UUID"
-        echo " 6. 手动输入新的【本机直连】UUID"
-        echo " 7. 手动输入新的【落地转发】UUID"
-        echo "------------------------------------------"
-        echo " [落地机 Shadowsocks 设置 (独立修改)]"
-        echo " 8. 修改落地机 IP/域名 (当前: $SS_ADDR)"
-        echo " 9. 修改落地机 端口 (当前: $SS_PORT)"
-        echo " 10. 修改落地机 密码 (当前: $SS_PASS)"
-        echo " 11. 一键修改落地机全部信息 (IP + 端口 + 密码)"
+        echo " 4. 重新生成用户 UUID"
+        echo " 5. 手动输入新的用户 UUID"
         echo "------------------------------------------"
         echo " 0. 返回主菜单"
         echo "=========================================="
-        read -p "请输入选项 [0-11]: " opt
+        read -p "请输入选项 [0-5]: " opt
         case "$opt" in
             1)
                 read -p "请输入新的端口 (1-65535): " new_port
@@ -520,68 +372,18 @@ modify_config() {
                 break
                 ;;
             4)
-                UUID_DIRECT=$($XRAY_BIN uuid)
-                echo -e "已重新生成【本机直连】UUID: \033[32m$UUID_DIRECT\033[0m"
+                UUID=$($XRAY_BIN uuid)
+                echo -e "已重新生成 UUID: \033[32m$UUID\033[0m"
                 rebuild_and_apply
                 break
                 ;;
             5)
-                UUID_RELAY=$($XRAY_BIN uuid)
-                echo -e "已重新生成【落地转发】UUID: \033[32m$UUID_RELAY\033[0m"
-                rebuild_and_apply
-                break
-                ;;
-            6)
-                read -p "请输入新的【本机直连】UUID: " custom_uid_dir
-                if [ -n "$custom_uid_dir" ]; then
-                    UUID_DIRECT="$custom_uid_dir"
+                read -p "请输入新的 UUID: " custom_uid
+                if [ -n "$custom_uid" ]; then
+                    UUID="$custom_uid"
                     rebuild_and_apply
                     break
                 fi
-                ;;
-            7)
-                read -p "请输入新的【落地转发】UUID: " custom_uid_rel
-                if [ -n "$custom_uid_rel" ]; then
-                    UUID_RELAY="$custom_uid_rel"
-                    rebuild_and_apply
-                    break
-                fi
-                ;;
-            8)
-                read -p "请输入新的落地机 IP/域名 (当前: $SS_ADDR): " new_ss_addr
-                if [ -n "$new_ss_addr" ]; then
-                    SS_ADDR="$new_ss_addr"
-                    rebuild_and_apply
-                    break
-                fi
-                ;;
-            9)
-                read -p "请输入新的落地机 SS 端口 (当前: $SS_PORT): " new_ss_port
-                if [[ "$new_ss_port" =~ ^[0-9]+$ ]] && [ "$new_ss_port" -ge 1 ] && [ "$new_ss_port" -le 65535 ]; then
-                    SS_PORT="$new_ss_port"
-                    rebuild_and_apply
-                    break
-                else
-                    echo -e "\033[31m端口输入不合法！\033[0m"; sleep 1
-                fi
-                ;;
-            10)
-                read -p "请输入新的落地机 SS 密码 (当前: $SS_PASS): " new_ss_pass
-                if [ -n "$new_ss_pass" ]; then
-                    SS_PASS="$new_ss_pass"
-                    rebuild_and_apply
-                    break
-                fi
-                ;;
-            11)
-                read -p "请输入落地机 IP/域名 (留空保持 $SS_ADDR): " b_addr
-                read -p "请输入落地机 端口 (留空保持 $SS_PORT): " b_port
-                read -p "请输入落地机 密码 (留空保持不变): " b_pass
-                [ -n "$b_addr" ] && SS_ADDR="$b_addr"
-                [ -n "$b_port" ] && SS_PORT="$b_port"
-                [ -n "$b_pass" ] && SS_PASS="$b_pass"
-                rebuild_and_apply
-                break
                 ;;
             0)
                 break
@@ -685,7 +487,7 @@ uninstall_xray() {
 while true; do
     clear
     echo "=========================================="
-    echo "      Xray-Reality 流量分流管理后台       "
+    echo "          Xray-Reality 管理后台           "
     echo "=========================================="
     echo -e "服务状态: $(get_status)"
     echo "------------------------------------------"
@@ -693,7 +495,7 @@ while true; do
     echo " 2. 启动 Xray"
     echo " 3. 停止 Xray"
     echo " 4. 查看节点链接及详细信息"
-    echo " 5. 修改节点配置 (独立修改端口/SNI/UUID/落地参数)"
+    echo " 5. 修改节点配置 (端口/SNI/密钥/UUID)"
     echo " 6. 查看运行日志"
     echo " 7. 彻底卸载 Xray"
     echo " 0. 退出菜单"

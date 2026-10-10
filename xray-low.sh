@@ -1,6 +1,6 @@
 #!/bin/bash
-# VLESS-Reality 低内存优化版 (双系统适配: Debian & Alpine + v4/v6双栈双节点 + xray运行后台管理菜单)
-# 【双栈纯净直连版：IPv4(30333) + IPv6(30334)】
+# VLESS-Reality 低内存优化版 (双系统适配: Debian & Alpine + 纯IPv4直连 + xray运行后台管理菜单)
+# 【纯净 IPv4 直连版：默认端口 30333】
 
 if [ "$(id -u)" != "0" ]; then
     echo "错误：请使用 root 权限运行"
@@ -62,46 +62,34 @@ PUBLIC_KEY=$(echo "$KEYS" | awk '/Public/ {print $NF}')
 SHORT_ID=$(openssl rand -hex 8)
 
 DEST_SNI="addons.mozilla.org"
-PORT_V4=30333
-PORT_V6=30334
-
-# 检查内核是否支持 IPv6
-HAS_IPV6_KERNEL=true
-if [ ! -f /proc/net/if_inet6 ]; then
-    HAS_IPV6_KERNEL=false
-    echo "⚠️ 检测到系统内核已完全禁用 IPv6，将仅启用 IPv4 监听。"
-fi
+PORT=30333
 
 # 保存变量配置到持久化文件供管理脚本使用
 {
-    echo "PORT_V4=\"$PORT_V4\""
-    echo "PORT_V6=\"$PORT_V6\""
+    echo "PORT=\"$PORT\""
     echo "DEST_SNI=\"$DEST_SNI\""
     echo "UUID=\"$UUID\""
     echo "PUBLIC_KEY=\"$PUBLIC_KEY\""
     echo "PRIVATE_KEY=\"$PRIVATE_KEY\""
     echo "SHORT_ID=\"$SHORT_ID\""
-    echo "HAS_IPV6_KERNEL=\"$HAS_IPV6_KERNEL\""
 } > /usr/local/etc/xray/params.env
 
 echo -e "\n====================================="
-echo "4. 正在生成 Xray 配置文件 (IPv4 + IPv6)..."
+echo "4. 正在生成 Xray 配置文件 (IPv4)..."
 echo "====================================="
 
 build_inbounds_json() {
-    local p4="$1"
-    local p6="$2"
-    local sni="$3"
-    local uuid="$4"
-    local priv="$5"
-    local sid="$6"
-    local has_v6="$7"
+    local port="$1"
+    local sni="$2"
+    local uuid="$3"
+    local priv="$4"
+    local sid="$5"
 
     echo "["
     echo "  {"
-    echo "    \"tag\": \"vless-v4\","
+    echo "    \"tag\": \"vless-in\","
     echo "    \"listen\": \"0.0.0.0\","
-    echo "    \"port\": $p4,"
+    echo "    \"port\": $port,"
     echo "    \"protocol\": \"vless\","
     echo "    \"settings\": {"
     echo "      \"clients\": [{\"id\": \"$uuid\", \"flow\": \"xtls-rprx-vision\"}],"
@@ -119,36 +107,13 @@ build_inbounds_json() {
     echo "    },"
     echo "    \"sniffing\": {\"enabled\": true, \"destOverride\": [\"http\", \"tls\"]}"
     echo "  }"
-    if [ "$has_v6" = "true" ]; then
-        echo "  ,{"
-        echo "    \"tag\": \"vless-v6\","
-        echo "    \"listen\": \"::\","
-        echo "    \"port\": $p6,"
-        echo "    \"protocol\": \"vless\","
-        echo "    \"settings\": {"
-        echo "      \"clients\": [{\"id\": \"$uuid\", \"flow\": \"xtls-rprx-vision\"}],"
-        echo "      \"decryption\": \"none\""
-        echo "    },"
-        echo "    \"streamSettings\": {"
-        echo "      \"network\": \"tcp\","
-        echo "      \"security\": \"reality\","
-        echo "      \"realitySettings\": {"
-        echo "        \"dest\": \"$sni:443\","
-        echo "        \"serverNames\": [\"$sni\"],"
-        echo "        \"privateKey\": \"$priv\","
-        echo "        \"shortIds\": [\"$sid\"]"
-        echo "      }"
-        echo "    },"
-        echo "    \"sniffing\": {\"enabled\": true, \"destOverride\": [\"http\", \"tls\"]}"
-        echo "  }"
-    fi
     echo "]"
 }
 
 {
     echo "{"
     echo '  "log": {"loglevel": "warning"},'
-    echo "  \"inbounds\": $(build_inbounds_json "$PORT_V4" "$PORT_V6" "$DEST_SNI" "$UUID" "$PRIVATE_KEY" "$SHORT_ID" "$HAS_IPV6_KERNEL"),"
+    echo "  \"inbounds\": $(build_inbounds_json "$PORT" "$DEST_SNI" "$UUID" "$PRIVATE_KEY" "$SHORT_ID"),"
     echo '  "outbounds": ['
     echo '    {"protocol": "freedom", "tag": "direct"},'
     echo '    {"protocol": "blackhole", "tag": "block"}'
@@ -209,38 +174,26 @@ EOF_OPENRC
 fi
 
 echo -e "\n====================================="
-echo "6. 获取公网 IP 并生成节点链接..."
+echo "6. 获取公网 IPv4 并生成节点链接..."
 echo "====================================="
 SERVER_IPV4=$(curl -s4 -m 5 ip.sb 2>/dev/null || curl -s4 -m 5 ifconfig.me 2>/dev/null || curl -s4 -m 5 api.ipify.org 2>/dev/null)
-SERVER_IPV6=$(curl -s6 -m 5 ip.sb 2>/dev/null || curl -s6 -m 5 ifconfig.me 2>/dev/null || curl -s6 -m 5 api64.ipify.org 2>/dev/null)
 
 if [ -n "$SERVER_IPV4" ]; then
-    NODE_LINK_V4="vless://${UUID}@${SERVER_IPV4}:${PORT_V4}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=chrome&type=tcp&flow=xtls-rprx-vision&sni=${DEST_SNI}&sid=${SHORT_ID}#Reality-IPv4"
+    NODE_LINK_V4="vless://${UUID}@${SERVER_IPV4}:${PORT}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=chrome&type=tcp&flow=xtls-rprx-vision&sni=${DEST_SNI}&sid=${SHORT_ID}#Reality-IPv4"
 else
-    NODE_LINK_V4="未检测到公网 IPv4，请手动替换 IP: vless://${UUID}@你的IPv4:${PORT_V4}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=chrome&type=tcp&flow=xtls-rprx-vision&sni=${DEST_SNI}&sid=${SHORT_ID}#Reality-IPv4"
-fi
-
-if [ -n "$SERVER_IPV6" ]; then
-    NODE_LINK_V6="vless://${UUID}@[${SERVER_IPV6}]:${PORT_V6}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=chrome&type=tcp&flow=xtls-rprx-vision&sni=${DEST_SNI}&sid=${SHORT_ID}#Reality-IPv6"
-else
-    NODE_LINK_V6="未检测到公网 IPv6 地址（若机器带有 IPv6，可自行填入 [IPv6] 使用）"
+    NODE_LINK_V4="未检测到公网 IPv4，请手动替换 IP: vless://${UUID}@你的IPv4:${PORT}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=chrome&type=tcp&flow=xtls-rprx-vision&sni=${DEST_SNI}&sid=${SHORT_ID}#Reality-IPv4"
 fi
 
 {
     echo "=========================================================================="
-    echo "🎉 VLESS-Reality 节点信息 (双栈双节点版)："
+    echo "🎉 VLESS-Reality 节点信息 (IPv4 版)："
     echo "=========================================================================="
-    echo "【1. IPv4 节点】(端口: ${PORT_V4})："
+    echo "【节点链接】(端口: ${PORT})："
     echo "${NODE_LINK_V4}"
     echo ""
     echo "--------------------------------------------------------------------------"
-    echo "【2. IPv6 节点】(端口: ${PORT_V6})："
-    echo "${NODE_LINK_V6}"
-    echo ""
-    echo "--------------------------------------------------------------------------"
     echo "详细参数："
-    echo "- IPv4 地址：${SERVER_IPV4:-无} (端口: ${PORT_V4})"
-    echo "- IPv6 地址：${SERVER_IPV6:-无} (端口: ${PORT_V6})"
+    echo "- IPv4 地址：${SERVER_IPV4:-无} (端口: ${PORT})"
     echo "- 用户ID (UUID)：${UUID}"
     echo "- 流控 (Flow)：xtls-rprx-vision"
     echo "- 传输协议 (Network)：tcp"
@@ -250,7 +203,7 @@ fi
     echo "=========================================================================="
 } > /usr/local/etc/xray/link.txt
 
-# 注入 /usr/local/bin/xray 管理工具 (完全无嵌套 Here-Doc 架构)
+# 注入 /usr/local/bin/xray 管理工具
 cat > /usr/local/bin/xray << 'EOF_MANAGEMENT_SCRIPT'
 #!/bin/bash
 
@@ -293,19 +246,17 @@ do_restart() {
 }
 
 render_inbounds() {
-    local p4="$1"
-    local p6="$2"
-    local sni="$3"
-    local uuid="$4"
-    local priv="$5"
-    local sid="$6"
-    local has_v6="$7"
+    local port="$1"
+    local sni="$2"
+    local uuid="$3"
+    local priv="$4"
+    local sid="$5"
 
     echo "["
     echo "  {"
-    echo "    \"tag\": \"vless-v4\","
+    echo "    \"tag\": \"vless-in\","
     echo "    \"listen\": \"0.0.0.0\","
-    echo "    \"port\": $p4,"
+    echo "    \"port\": $port,"
     echo "    \"protocol\": \"vless\","
     echo "    \"settings\": {"
     echo "      \"clients\": [{\"id\": \"$uuid\", \"flow\": \"xtls-rprx-vision\"}],"
@@ -323,29 +274,6 @@ render_inbounds() {
     echo "    },"
     echo "    \"sniffing\": {\"enabled\": true, \"destOverride\": [\"http\", \"tls\"]}"
     echo "  }"
-    if [ "$has_v6" = "true" ]; then
-        echo "  ,{"
-        echo "    \"tag\": \"vless-v6\","
-        echo "    \"listen\": \"::\","
-        echo "    \"port\": $p6,"
-        echo "    \"protocol\": \"vless\","
-        echo "    \"settings\": {"
-        echo "      \"clients\": [{\"id\": \"$uuid\", \"flow\": \"xtls-rprx-vision\"}],"
-        echo "      \"decryption\": \"none\""
-        echo "    },"
-        echo "    \"streamSettings\": {"
-        echo "      \"network\": \"tcp\","
-        echo "      \"security\": \"reality\","
-        echo "      \"realitySettings\": {"
-        echo "        \"dest\": \"$sni:443\","
-        echo "        \"serverNames\": [\"$sni\"],"
-        echo "        \"privateKey\": \"$priv\","
-        echo "        \"shortIds\": [\"$sid\"]"
-        echo "      }"
-        echo "    },"
-        echo "    \"sniffing\": {\"enabled\": true, \"destOverride\": [\"http\", \"tls\"]}"
-        echo "  }"
-    fi
     echo "]"
 }
 
@@ -356,7 +284,7 @@ rebuild_and_apply() {
     {
         echo "{"
         echo '  "log": {"loglevel": "warning"},'
-        echo "  \"inbounds\": $(render_inbounds "$PORT_V4" "$PORT_V6" "$DEST_SNI" "$UUID" "$PRIVATE_KEY" "$SHORT_ID" "$HAS_IPV6_KERNEL"),"
+        echo "  \"inbounds\": $(render_inbounds "$PORT" "$DEST_SNI" "$UUID" "$PRIVATE_KEY" "$SHORT_ID"),"
         echo '  "outbounds": ['
         echo '    {"protocol": "freedom", "tag": "direct"},'
         echo '    {"protocol": "blackhole", "tag": "block"}'
@@ -366,14 +294,12 @@ rebuild_and_apply() {
 
     # 写回参数文件
     {
-        echo "PORT_V4=\"$PORT_V4\""
-        echo "PORT_V6=\"$PORT_V6\""
+        echo "PORT=\"$PORT\""
         echo "DEST_SNI=\"$DEST_SNI\""
         echo "UUID=\"$UUID\""
         echo "PUBLIC_KEY=\"$PUBLIC_KEY\""
         echo "PRIVATE_KEY=\"$PRIVATE_KEY\""
         echo "SHORT_ID=\"$SHORT_ID\""
-        echo "HAS_IPV6_KERNEL=\"$HAS_IPV6_KERNEL\""
     } > "$ENV_FILE"
 
     do_restart
@@ -381,38 +307,24 @@ rebuild_and_apply() {
 
     echo "🔍 正在更新节点信息..."
     local s_v4=$(curl -s4 -m 5 ip.sb 2>/dev/null || curl -s4 -m 5 ifconfig.me 2>/dev/null || curl -s4 -m 5 api.ipify.org 2>/dev/null)
-    local s_v6=$(curl -s6 -m 5 ip.sb 2>/dev/null || curl -s6 -m 5 ifconfig.me 2>/dev/null || curl -s6 -m 5 api64.ipify.org 2>/dev/null)
 
     local link_v4=""
-    local link_v6=""
-
     if [ -n "$s_v4" ]; then
-        link_v4="vless://${UUID}@${s_v4}:${PORT_V4}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=chrome&type=tcp&flow=xtls-rprx-vision&sni=${DEST_SNI}&sid=${SHORT_ID}#Reality-IPv4"
+        link_v4="vless://${UUID}@${s_v4}:${PORT}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=chrome&type=tcp&flow=xtls-rprx-vision&sni=${DEST_SNI}&sid=${SHORT_ID}#Reality-IPv4"
     else
-        link_v4="未检测到公网 IPv4: vless://${UUID}@你的IPv4:${PORT_V4}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=chrome&type=tcp&flow=xtls-rprx-vision&sni=${DEST_SNI}&sid=${SHORT_ID}#Reality-IPv4"
-    fi
-
-    if [ -n "$s_v6" ]; then
-        link_v6="vless://${UUID}@[${s_v6}]:${PORT_V6}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=chrome&type=tcp&flow=xtls-rprx-vision&sni=${DEST_SNI}&sid=${SHORT_ID}#Reality-IPv6"
-    else
-        link_v6="未检测到公网 IPv6 地址"
+        link_v4="未检测到公网 IPv4: vless://${UUID}@你的IPv4:${PORT}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=chrome&type=tcp&flow=xtls-rprx-vision&sni=${DEST_SNI}&sid=${SHORT_ID}#Reality-IPv4"
     fi
 
     {
         echo "=========================================================================="
         echo "🎉 VLESS-Reality 最新节点信息："
         echo "=========================================================================="
-        echo "【1. IPv4 节点】(端口: ${PORT_V4})："
+        echo "【节点链接】(端口: ${PORT})："
         echo "${link_v4}"
         echo ""
         echo "--------------------------------------------------------------------------"
-        echo "【2. IPv6 节点】(端口: ${PORT_V6})："
-        echo "${link_v6}"
-        echo ""
-        echo "--------------------------------------------------------------------------"
         echo "详细参数："
-        echo "- IPv4 地址：${s_v4:-无} (端口: ${PORT_V4})"
-        echo "- IPv6 地址：${s_v6:-无} (端口: ${PORT_V6})"
+        echo "- IPv4 地址：${s_v4:-无} (端口: ${PORT})"
         echo "- 用户ID (UUID)：${UUID}"
         echo "- 流控 (Flow)：xtls-rprx-vision"
         echo "- 传输协议 (Network)：tcp"
@@ -436,20 +348,19 @@ modify_config() {
         echo "=========================================="
         echo "           修改 Xray 节点配置             "
         echo "=========================================="
-        echo " 1. 修改 IPv4 监听端口 (当前: $PORT_V4)"
-        echo " 2. 修改 IPv6 监听端口 (当前: $PORT_V6)"
-        echo " 3. 修改 Reality 伪装域名 (SNI) (当前: $DEST_SNI)"
-        echo " 4. 重新生成 UUID (更换用户凭证)"
-        echo " 5. 重新生成 Reality 密钥对(Keypair)及 ShortID"
-        echo " 6. 批量修改 (IPv4端口 + IPv6端口 + SNI)"
+        echo " 1. 修改监听端口 (当前: $PORT)"
+        echo " 2. 修改 Reality 伪装域名 (SNI) (当前: $DEST_SNI)"
+        echo " 3. 重新生成 UUID (更换用户凭证)"
+        echo " 4. 重新生成 Reality 密钥对(Keypair)及 ShortID"
+        echo " 5. 批量修改 (监听端口 + SNI)"
         echo " 0. 返回主菜单"
         echo "=========================================="
-        read -p "请输入选项 [0-6]: " opt
+        read -p "请输入选项 [0-5]: " opt
         case "$opt" in
             1)
-                read -p "请输入新的 IPv4 端口 (1-65535): " new_v4
-                if [[ "$new_v4" =~ ^[0-9]+$ ]] && [ "$new_v4" -ge 1 ] && [ "$new_v4" -le 65535 ]; then
-                    PORT_V4="$new_v4"
+                read -p "请输入新的端口 (1-65535): " new_port
+                if [[ "$new_port" =~ ^[0-9]+$ ]] && [ "$new_port" -ge 1 ] && [ "$new_port" -le 65535 ]; then
+                    PORT="$new_port"
                     rebuild_and_apply
                     break
                 else
@@ -457,16 +368,6 @@ modify_config() {
                 fi
                 ;;
             2)
-                read -p "请输入新的 IPv6 端口 (1-65535): " new_v6
-                if [[ "$new_v6" =~ ^[0-9]+$ ]] && [ "$new_v6" -ge 1 ] && [ "$new_v6" -le 65535 ]; then
-                    PORT_V6="$new_v6"
-                    rebuild_and_apply
-                    break
-                else
-                    echo -e "\033[31m端口输入不合法！\033[0m"; sleep 1
-                fi
-                ;;
-            3)
                 read -p "请输入新的伪装域名 SNI (如 www.microsoft.com): " new_sni
                 if [ -n "$new_sni" ]; then
                     DEST_SNI="$new_sni"
@@ -476,13 +377,13 @@ modify_config() {
                     echo -e "\033[31m域名不能为空！\033[0m"; sleep 1
                 fi
                 ;;
-            4)
+            3)
                 UUID=$($XRAY_BIN uuid)
                 echo -e "已生成新 UUID: \033[32m$UUID\033[0m"
                 rebuild_and_apply
                 break
                 ;;
-            5)
+            4)
                 KEYS=$($XRAY_BIN x25519)
                 PRIVATE_KEY=$(echo "$KEYS" | awk '/Private/ {print $NF}')
                 PUBLIC_KEY=$(echo "$KEYS" | awk '/Public/ {print $NF}')
@@ -491,12 +392,10 @@ modify_config() {
                 rebuild_and_apply
                 break
                 ;;
-            6)
-                read -p "请输入新 IPv4 端口 (留空保持 $PORT_V4): " b_v4
-                read -p "请输入新 IPv6 端口 (留空保持 $PORT_V6): " b_v6
+            5)
+                read -p "请输入新端口 (留空保持 $PORT): " b_port
                 read -p "请输入新伪装 SNI (留空保持 $DEST_SNI): " b_sni
-                [ -n "$b_v4" ] && PORT_V4="$b_v4"
-                [ -n "$b_v6" ] && PORT_V6="$b_v6"
+                [ -n "$b_port" ] && PORT="$b_port"
                 [ -n "$b_sni" ] && DEST_SNI="$b_sni"
                 rebuild_and_apply
                 break
@@ -610,7 +509,7 @@ while true; do
     echo " 1. 重启 Xray"
     echo " 2. 启动 Xray"
     echo " 3. 停止 Xray"
-    echo " 4. 查看节点链接及配置 (IPv4 + IPv6)"
+    echo " 4. 查看节点链接及配置"
     echo " 5. 修改节点配置 (端口/SNI/UUID/密钥)"
     echo " 6. 查看运行日志"
     echo " 7. 彻底卸载 Xray"

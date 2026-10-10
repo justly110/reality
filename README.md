@@ -5,13 +5,13 @@
 
 ## 1. 一键部署安装
 
-在 VPS 终端（Root 用户）中直接执行以下命令进行安装(v4 v6端口均为443)：
+在 VPS 终端（Root 用户）中直接执行以下命令进行安装(端口为443)：
 
 ```bash
 bash <(wget -qO- -o- https://github.com/justly110/reality/raw/main/xray.sh)
 ```
 
-低内存机器使用下面命令安装(内存小于512M NAT专用 v4端口30333 v6端口30334)：
+低内存机器使用下面命令安装(内存小于512M NAT专用 v4端口30333)：
 
 ```bash
 bash <(wget -qO- -o- https://github.com/justly110/reality/raw/main/xray-low.sh)
@@ -40,7 +40,7 @@ xray
  1. 重启 Xray
  2. 启动 Xray
  3. 停止 Xray
- 4. 查看节点链接及配置 (IPv4 + IPv6)
+ 4. 查看节点链接及配置
  5. 修改节点配置 (端口/SNI/UUID/密钥)
  6. 查看运行日志
  7. 彻底卸载 Xray
