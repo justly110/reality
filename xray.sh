@@ -4,7 +4,7 @@
 # 特性：
 # 1. 智能配置检测与平滑升级 (已有配置免改参)
 # 2. 默认每月24日重置月度流量 (持久化存盘，进程重启不丢失)
-# 3. 流量超额自动熔断关停保护
+# 3. 默认 1000G 流量熔断保护 (双节点上行+下行合计未达 1000G 不熔断)
 # 4. 落地机 TCP 毫秒握手延迟与连通性测试
 # 5. TCP BBR 状态检测与环境识别 (支持机器开启，容器小鸡友好提示)
 # 6. 修改 SNI 伪装域名自动握手与证书体积极速体检
@@ -12,7 +12,7 @@
 # 8. Xray 内核与管理脚本在线独立检查升级
 # ==============================================================================
 
-SCRIPT_VERSION="0.0.3"
+SCRIPT_VERSION="0.0.4"
 SCRIPT_URL="https://github.com/justly110/reality/raw/main/xray.sh"
 
 ENV_FILE="/usr/local/etc/xray/params.env"
@@ -281,7 +281,7 @@ init_traffic_db() {
     if [ ! -f "$TRAFFIC_FILE" ]; then
         cat > "$TRAFFIC_FILE" << 'EOF'
 RESET_DAY=24
-TRAFFIC_LIMIT_GB=0
+TRAFFIC_LIMIT_GB=1000
 LAST_RESET_MONTH=""
 U1_UP=0
 U1_DOWN=0
@@ -289,6 +289,11 @@ U2_UP=0
 U2_DOWN=0
 FUSED=0
 EOF
+    else
+        # 兼容旧版本：如果以前没有设置限额或为0，默认更新为 1000G
+        if ! grep -q "TRAFFIC_LIMIT_GB" "$TRAFFIC_FILE" || grep -q "TRAFFIC_LIMIT_GB=0" "$TRAFFIC_FILE"; then
+            sed -i 's/TRAFFIC_LIMIT_GB=.*/TRAFFIC_LIMIT_GB=1000/' "$TRAFFIC_FILE" 2>/dev/null || echo "TRAFFIC_LIMIT_GB=1000" >> "$TRAFFIC_FILE"
+        fi
     fi
 
     # 配置 Cron 定时任务（每 10 分钟同步流量存盘与配额熔断检查）
@@ -347,7 +352,7 @@ write_management_cli() {
     cat > /usr/local/bin/xray << 'EOF_MANAGEMENT_SCRIPT'
 #!/bin/bash
 
-SCRIPT_VERSION="0.0.3"
+SCRIPT_VERSION="0.0.4"
 SCRIPT_URL="https://github.com/justly110/reality/raw/main/xray.sh"
 
 ENV_FILE="/usr/local/etc/xray/params.env"
@@ -361,14 +366,14 @@ load_env() {
 }
 
 load_traffic_env() {
-    RESET_DAY=24; TRAFFIC_LIMIT_GB=0; LAST_RESET_MONTH=""; U1_UP=0; U1_DOWN=0; U2_UP=0; U2_DOWN=0; FUSED=0
+    RESET_DAY=24; TRAFFIC_LIMIT_GB=1000; LAST_RESET_MONTH=""; U1_UP=0; U1_DOWN=0; U2_UP=0; U2_DOWN=0; FUSED=0
     [ -f "$TRAFFIC_FILE" ] && source "$TRAFFIC_FILE"
 }
 
 save_traffic_env() {
     cat > "$TRAFFIC_FILE" << EOF
 RESET_DAY=${RESET_DAY:-24}
-TRAFFIC_LIMIT_GB=${TRAFFIC_LIMIT_GB:-0}
+TRAFFIC_LIMIT_GB=${TRAFFIC_LIMIT_GB:-1000}
 LAST_RESET_MONTH="${LAST_RESET_MONTH}"
 U1_UP=${U1_UP:-0}
 U1_DOWN=${U1_DOWN:-0}
@@ -383,13 +388,13 @@ get_status() {
         if systemctl is-active --quiet xray; then
             echo -e "\033[32m● 正在运行 (Running)\033[0m"
         else
-            [ "${FUSED:-0}" -eq 1 ] && echo -e "\033[31m⛔ 已熔断关停 (超额保护)\033[0m" || echo -e "\033[31m○ 未运行 (Stopped)\033[0m"
+            [ "${FUSED:-0}" -eq 1 ] && echo -e "\033[31m⛔ 已熔断关停 (达限额保护)\033[0m" || echo -e "\033[31m○ 未运行 (Stopped)\033[0m"
         fi
     elif command -v rc-service >/dev/null 2>&1; then
         if rc-service xray status 2>/dev/null | grep -q "started"; then
             echo -e "\033[32m● 正在运行 (Running)\033[0m"
         else
-            [ "${FUSED:-0}" -eq 1 ] && echo -e "\033[31m⛔ 已熔断关停 (超额保护)\033[0m" || echo -e "\033[31m○ 未运行 (Stopped)\033[0m"
+            [ "${FUSED:-0}" -eq 1 ] && echo -e "\033[31m⛔ 已熔断关停 (达限额保护)\033[0m" || echo -e "\033[31m○ 未运行 (Stopped)\033[0m"
         fi
     fi
 }
@@ -422,7 +427,7 @@ sync_traffic_data() {
     local cur_d=$(date +%-d)
     local r_day=${RESET_DAY:-24}
 
-    # 1. 检查是否达到设定的重置日
+    # 1. 检查是否达到设定的重置日 (例如 24 号)
     if [ "$cur_d" -ge "$r_day" ]; then
         local this_cycle_tag="${cur_y}-${cur_m}"
         if [ "$LAST_RESET_MONTH" != "$this_cycle_tag" ]; then
@@ -447,9 +452,9 @@ sync_traffic_data() {
         U2_DOWN=$((U2_DOWN + ${delta_u2_down:-0}))
     fi
 
-    # 3. 超额熔断检查
+    # 3. 超额熔断检查 (双节点 上行+下行 合计超过 1000G 才熔断)
     local total_bytes=$((U1_UP + U1_DOWN + U2_UP + U2_DOWN))
-    if [ "${TRAFFIC_LIMIT_GB:-0}" -gt 0 ]; then
+    if [ "${TRAFFIC_LIMIT_GB:-1000}" -gt 0 ]; then
         local limit_bytes=$((TRAFFIC_LIMIT_GB * 1024 * 1024 * 1024))
         if [ "$total_bytes" -ge "$limit_bytes" ]; then
             if [ "$FUSED" -ne 1 ]; then
@@ -513,10 +518,18 @@ show_traffic_menu() {
         echo "=========================================="
         echo "【当前账单周期】: $(get_cycle_range)"
         echo "【每月重置日期】: 每月 ${RESET_DAY:-24} 日"
-        if [ "${TRAFFIC_LIMIT_GB:-0}" -gt 0 ]; then
+        if [ "${TRAFFIC_LIMIT_GB:-1000}" -gt 0 ]; then
             local pct=$(awk -v cur="$grand_total" -v lim="$TRAFFIC_LIMIT_GB" 'BEGIN { printf "%.1f", (cur / (lim*1024*1024*1024)) * 100 }')
-            echo "【月度流量限额】: ${TRAFFIC_LIMIT_GB} GB (已用: ${pct}%)"
-            [ "$FUSED" -eq 1 ] && echo -e "【熔断防护状态】: \033[31m⛔ 已触发熔断，服务已关停！\033[0m" || echo -e "【熔断防护状态】: \033[32m✔ 正常运行中\033[0m"
+            local limit_bytes=$((TRAFFIC_LIMIT_GB * 1024 * 1024 * 1024))
+            local rem_bytes=$((limit_bytes - grand_total))
+            [ "$rem_bytes" -lt 0 ] && rem_bytes=0
+
+            echo "【月度流量限额】: ${TRAFFIC_LIMIT_GB} GB (双节点合计已用: ${pct}%，剩余可用: $(format_bytes $rem_bytes))"
+            if [ "$FUSED" -eq 1 ]; then
+                echo -e "【熔断防护状态】: \033[31m⛔ 已达 ${TRAFFIC_LIMIT_GB}GB 限额，触发自动停机保护！\033[0m"
+            else
+                echo -e "【熔断防护状态】: \033[32m✔ 正常运行中 (双节点合计未超额，无需熔断)\033[0m"
+            fi
         else
             echo "【月度流量限额】: 未设置 (不限用量)"
         fi
@@ -529,10 +542,10 @@ show_traffic_menu() {
         echo "  ↑ 上行: $(format_bytes $U2_UP) | ↓ 下行: $(format_bytes $U2_DOWN)"
         echo "  ∑ 合计: $(format_bytes $total_u2)"
         echo "------------------------------------------"
-        echo -e "【本周期总消耗】: \033[1;32m$(format_bytes $grand_total)\033[0m"
+        echo -e "【双节点总计消耗】: \033[1;32m$(format_bytes $grand_total)\033[0m (上行+下行合计)"
         echo "=========================================="
-        echo " 1. 修改每月重置日期 (当前: 每月 ${RESET_DAY} 号)"
-        echo " 2. 设置月度流量熔断阈值 (当前: ${TRAFFIC_LIMIT_GB} GB)"
+        echo " 1. 修改每月重置日期 (当前: 每月 ${RESET_DAY:-24} 号)"
+        echo " 2. 修改月度流量限额阈值 (当前: ${TRAFFIC_LIMIT_GB:-1000} GB)"
         echo " 3. 手动清零当前周期流量 / 强制解除熔断"
         echo " 0. 返回主管理菜单"
         echo "=========================================="
@@ -549,11 +562,12 @@ show_traffic_menu() {
                 fi
                 ;;
             2)
-                read -p "请输入每月流量限额 (单位 GB，输入 0 则不限制): " new_lim </dev/tty
+                read -p "请输入每月流量限额 (单位 GB，默认 1000，输入 0 则不限制): " new_lim </dev/tty
+                new_lim=${new_lim:-1000}
                 if [[ "$new_lim" =~ ^[0-9]+$ ]]; then
                     TRAFFIC_LIMIT_GB="$new_lim"
                     save_traffic_env
-                    echo -e "\033[32m✔ 流量配额已更新！\033[0m"; sleep 1
+                    echo -e "\033[32m✔ 流量配额已更新为 ${TRAFFIC_LIMIT_GB} GB！\033[0m"; sleep 1
                 else
                     echo -e "\033[31m输入不合法！\033[0m"; sleep 1
                 fi
@@ -623,7 +637,6 @@ manage_bbr() {
     [ -n "$virt" ] && echo "底层虚拟化架构   : $virt"
     echo "------------------------------------------"
 
-    # 检查是否为只读或容器架构
     local is_container=0
     if [ "$virt" = "lxc" ] || [ "$virt" = "openvz" ] || [ ! -w "/proc/sys/net/ipv4/tcp_congestion_control" ]; then
         is_container=1
@@ -670,14 +683,12 @@ verify_sni_health() {
     local sni="$1"
     echo -e "\n⏳ 正在对域名 [$sni] 进行安全与兼容性体检..."
 
-    # 1. 域名解析测试
     if ! getent hosts "$sni" >/dev/null 2>&1 && ! ping -c 1 -W 2 "$sni" >/dev/null 2>&1; then
         echo -e "\033[31m❌ 警告: 无法解析域名 $sni，该域名可能不存在！\033[0m"
         read -p "是否强制忽略警告继续使用？[y/N]: " f_use </dev/tty
         [[ "$f_use" =~ ^[yY]$ ]] && return 0 || return 1
     fi
 
-    # 2. TLS 1.3 协议支持测试 (Reality 硬性要求)
     local tls_out=$(timeout 5 openssl s_client -connect "${sni}:443" -servername "${sni}" -tls1_3 </dev/null 2>&1)
     if ! echo "$tls_out" | grep -qE "Protocol *: *TLSv1.3"; then
         echo -e "\033[31m❌ 严重不推荐: 该域名未通过 TLS 1.3 握手！\033[0m"
@@ -686,7 +697,6 @@ verify_sni_health() {
         [[ "$f_use" =~ ^[yY]$ ]] && return 0 || return 1
     fi
 
-    # 3. 证书体积测试 (防 8KB 缓冲区溢出)
     local cert_bytes=$(echo "$tls_out" | openssl x509 -outform DER 2>/dev/null | wc -c)
     cert_bytes=${cert_bytes:-0}
 
@@ -1105,8 +1115,8 @@ while true; do
     load_traffic_env
     clear
     local total_cur=$((U1_UP + U1_DOWN + U2_UP + U2_DOWN))
-    local lim_str="不限"
-    [ "${TRAFFIC_LIMIT_GB:-0}" -gt 0 ] && lim_str="${TRAFFIC_LIMIT_GB} GB"
+    local lim_str="${TRAFFIC_LIMIT_GB:-1000} GB"
+    [ "${TRAFFIC_LIMIT_GB:-1000}" -eq 0 ] && lim_str="不限"
 
     echo "=========================================="
     echo "      Xray-Reality 流量分流管理后台       "
