@@ -1,10 +1,10 @@
 #!/bin/bash
 # ==============================================================================
 # VLESS-Reality 分流中转版 (Debian & Alpine + 纯IPv4单栈 + 本机/落地双用户分流)
-# 特性：智能配置检测与平滑升级 + 实时流量统计监控 + 内核与脚本在线独立更新
+# 特性：智能配置检测与平滑升级 + 实时流量统计监控 + 内核与脚本在线独立更新 + 低内存自动调优
 # ==============================================================================
 
-SCRIPT_VERSION="0.0.1"
+SCRIPT_VERSION="0.0.2"
 SCRIPT_URL="https://github.com/justly110/reality/raw/main/xray.sh"
 
 ENV_FILE="/usr/local/etc/xray/params.env"
@@ -16,6 +16,9 @@ if [ "$(id -u)" != "0" ]; then
     echo "❌ 错误：请使用 root 权限运行本脚本"
     exit 1
 fi
+
+# 尝试清理系统缓存释放内存
+sync; echo 3 2>/dev/null > /proc/sys/vm/drop_caches || true
 
 # ------------------------------------------------------------------------------
 # 1. 检查现有配置是否完整
@@ -198,13 +201,40 @@ render_config_json() {
 }
 
 write_service() {
+    # 检测 VPS 物理总内存 (单位: MB)
+    local TOTAL_MEM_MB=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo 2>/dev/null)
+    TOTAL_MEM_MB=${TOTAL_MEM_MB:-512}
+    local SYSTEMD_ENV=""
+    local OPENRC_ENV=""
+
+    # 标称 256MB VPS 由于内核预留占用，实际报告通常在 220MB~250MB 之间，设定阈值 < 260MB 精准命中
+    if [ "$TOTAL_MEM_MB" -lt 260 ]; then
+        echo -e "💡 检测到当前内存较小 (\033[33m${TOTAL_MEM_MB}MB\033[0m <= 256MB)，\033[32m已自动启用低内存防 OOM 调优参数\033[0m (GOGC=20, GOMEMLIMIT=30MiB, madvdontneed=1)"
+        SYSTEMD_ENV=$(cat << 'EOF'
+Environment="GOGC=20"
+Environment="GOMEMLIMIT=30MiB"
+Environment="GODEBUG=madvdontneed=1"
+EOF
+)
+        OPENRC_ENV=$(cat << 'EOF'
+export GOGC=20
+export GOMEMLIMIT=30MiB
+export GODEBUG=madvdontneed=1
+EOF
+)
+    else
+        echo "💡 检测到当前内存充裕 (${TOTAL_MEM_MB}MB)，使用标准模式运行。"
+    fi
+
+    # 1. Systemd 系统 (Debian / Ubuntu / CentOS 等)
     if command -v systemctl >/dev/null 2>&1; then
-        cat > /etc/systemd/system/xray.service << 'EOF_SYSTEMD'
+        cat > /etc/systemd/system/xray.service << EOF_SYSTEMD
 [Unit]
 Description=Xray Service
 After=network.target nss-lookup.target
 
 [Service]
+${SYSTEMD_ENV}
 ExecStart=/usr/local/bin/xray-core run -config /usr/local/etc/xray/config.json
 Restart=on-failure
 RestartPreventExitStatus=23
@@ -217,22 +247,26 @@ EOF_SYSTEMD
         systemctl daemon-reload
         systemctl enable xray >/dev/null 2>&1
         systemctl restart xray
+
+    # 2. OpenRC 系统 (Alpine Linux 等)
     elif command -v rc-update >/dev/null 2>&1; then
-        cat > /etc/init.d/xray << 'EOF_OPENRC'
-#!/sbin/openrc-run
-
-name="xray"
-description="Xray Service"
-command="/usr/local/bin/xray-core"
-command_args="run -c /usr/local/etc/xray/config.json"
-command_background="yes"
-pidfile="/var/run/${RC_SVCNAME}.pid"
-
-depend() {
-    need net
-    after network
-}
-EOF_OPENRC
+        {
+            echo '#!/sbin/openrc-run'
+            echo ''
+            echo 'name="xray"'
+            echo 'description="Xray Service"'
+            echo 'command="/usr/local/bin/xray-core"'
+            echo 'command_args="run -c /usr/local/etc/xray/config.json"'
+            echo 'command_background="yes"'
+            echo 'pidfile="/var/run/${RC_SVCNAME}.pid"'
+            echo ''
+            [ -n "$OPENRC_ENV" ] && echo "$OPENRC_ENV"
+            echo ''
+            echo 'depend() {'
+            echo '    need net'
+            echo '    after network'
+            echo '}'
+        } > /etc/init.d/xray
         chmod +x /etc/init.d/xray
         rc-update add xray default >/dev/null 2>&1
         rc-service xray restart
@@ -280,7 +314,7 @@ write_management_cli() {
     cat > /usr/local/bin/xray << 'EOF_MANAGEMENT_SCRIPT'
 #!/bin/bash
 
-SCRIPT_VERSION="0.0.1"
+SCRIPT_VERSION="0.0.2"
 SCRIPT_URL="https://github.com/justly110/reality/raw/main/xray.sh"
 
 ENV_FILE="/usr/local/etc/xray/params.env"
