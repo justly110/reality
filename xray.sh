@@ -12,7 +12,7 @@
 # 8. Xray 内核与管理脚本在线独立检查升级
 # ==============================================================================
 
-SCRIPT_VERSION="0.0.4"
+SCRIPT_VERSION="0.0.5"
 SCRIPT_URL="https://github.com/justly110/reality/raw/main/xray.sh"
 
 ENV_FILE="/usr/local/etc/xray/params.env"
@@ -290,21 +290,18 @@ U2_DOWN=0
 FUSED=0
 EOF
     else
-        # 兼容旧版本：如果以前没有设置限额或为0，默认更新为 1000G
         if ! grep -q "TRAFFIC_LIMIT_GB" "$TRAFFIC_FILE" || grep -q "TRAFFIC_LIMIT_GB=0" "$TRAFFIC_FILE"; then
             sed -i 's/TRAFFIC_LIMIT_GB=.*/TRAFFIC_LIMIT_GB=1000/' "$TRAFFIC_FILE" 2>/dev/null || echo "TRAFFIC_LIMIT_GB=1000" >> "$TRAFFIC_FILE"
         fi
     fi
 
-    # 配置 Cron 定时任务（每 10 分钟同步流量存盘与配额熔断检查）
     if [ -d "/etc/cron.d" ]; then
-        echo "*/10 * * * * root /usr/local/bin/xray --sync-traffic >/dev/null 2>&1" > /etc/cron.d/xray-traffic
+        echo "*/2 * * * * root /usr/local/bin/xray --sync-traffic >/dev/null 2>&1" > /etc/cron.d/xray-traffic
         chmod 644 /etc/cron.d/xray-traffic
     elif command -v crontab >/dev/null 2>&1; then
-        (crontab -l 2>/dev/null | grep -v "xray --sync-traffic"; echo "*/10 * * * * /usr/local/bin/xray --sync-traffic >/dev/null 2>&1") | crontab -
+        (crontab -l 2>/dev/null | grep -v "xray --sync-traffic"; echo "*/2 * * * * /usr/local/bin/xray --sync-traffic >/dev/null 2>&1") | crontab -
     fi
 
-    # Alpine 确保 crond 运行
     if command -v rc-update >/dev/null 2>&1; then
         rc-update add crond default >/dev/null 2>&1 || true
         rc-service crond start >/dev/null 2>&1 || true
@@ -352,7 +349,7 @@ write_management_cli() {
     cat > /usr/local/bin/xray << 'EOF_MANAGEMENT_SCRIPT'
 #!/bin/bash
 
-SCRIPT_VERSION="0.0.4"
+SCRIPT_VERSION="0.0.5"
 SCRIPT_URL="https://github.com/justly110/reality/raw/main/xray.sh"
 
 ENV_FILE="/usr/local/etc/xray/params.env"
@@ -452,7 +449,7 @@ sync_traffic_data() {
         U2_DOWN=$((U2_DOWN + ${delta_u2_down:-0}))
     fi
 
-    # 3. 超额熔断检查 (双节点 上行+下行 合计超过 1000G 才熔断)
+    # 3. 超额熔断检查 (双节点 上行+下行 合计超过限额才熔断)
     local total_bytes=$((U1_UP + U1_DOWN + U2_UP + U2_DOWN))
     if [ "${TRAFFIC_LIMIT_GB:-1000}" -gt 0 ]; then
         local limit_bytes=$((TRAFFIC_LIMIT_GB * 1024 * 1024 * 1024))
@@ -1110,50 +1107,54 @@ uninstall_xray() {
 }
 
 # ----------------- 主菜单 -----------------
-while true; do
-    sync_traffic_data
-    load_traffic_env
-    clear
-    local total_cur=$((U1_UP + U1_DOWN + U2_UP + U2_DOWN))
-    local lim_str="${TRAFFIC_LIMIT_GB:-1000} GB"
-    [ "${TRAFFIC_LIMIT_GB:-1000}" -eq 0 ] && lim_str="不限"
+main_menu() {
+    while true; do
+        sync_traffic_data
+        load_traffic_env
+        clear
+        local total_cur=$((U1_UP + U1_DOWN + U2_UP + U2_DOWN))
+        local lim_str="${TRAFFIC_LIMIT_GB:-1000} GB"
+        [ "${TRAFFIC_LIMIT_GB:-1000}" -eq 0 ] && lim_str="不限"
 
-    echo "=========================================="
-    echo "      Xray-Reality 流量分流管理后台       "
-    echo "=========================================="
-    echo -e "服务状态: $(get_status)"
-    echo -e "月度流量: 已用 \033[1;33m$(format_bytes $total_cur)\033[0m / 限额 ${lim_str} (重置日: 每月 ${RESET_DAY:-24} 号)"
-    echo "------------------------------------------"
-    echo " 1. 重启 Xray"
-    echo " 2. 启动 Xray"
-    echo " 3. 停止 Xray"
-    echo " 4. 查看节点链接及详细信息"
-    echo " 5. 查看月度流量统计与熔断设置"
-    echo " 6. 修改节点配置 (独立修改端口/SNI/UUID/落地机)"
-    echo " 7. 测试落地机连通性与握手延迟"
-    echo " 8. TCP BBR 加速状态与管理"
-    echo " 9. 检查与升级 (Xray内核 / 管理脚本)"
-    echo " 10. 查看运行日志"
-    echo " 11. 彻底卸载 Xray"
-    echo " 0. 退出菜单"
-    echo "=========================================="
-    read -p "请输入选项 [0-11]: " choice </dev/tty
-    case "$choice" in
-        1) restart_xray ;;
-        2) start_xray ;;
-        3) stop_xray ;;
-        4) show_info ;;
-        5) show_traffic_menu ;;
-        6) modify_config ;;
-        7) test_landing_server ;;
-        8) manage_bbr ;;
-        9) update_menu ;;
-        10) show_logs ;;
-        11) uninstall_xray ;;
-        0) clear; exit 0 ;;
-        *) echo -e "\033[31m无效输入！\033[0m"; sleep 1 ;;
-    esac
-done
+        echo "=========================================="
+        echo "      Xray-Reality 流量分流管理后台       "
+        echo "=========================================="
+        echo -e "服务状态: $(get_status)"
+        echo -e "月度流量: 已用 \033[1;33m$(format_bytes $total_cur)\033[0m / 限额 ${lim_str} (重置日: 每月 ${RESET_DAY:-24} 号)"
+        echo "------------------------------------------"
+        echo " 1. 重启 Xray"
+        echo " 2. 启动 Xray"
+        echo " 3. 停止 Xray"
+        echo " 4. 查看节点链接及详细信息"
+        echo " 5. 查看月度流量统计与熔断设置"
+        echo " 6. 修改节点配置 (独立修改端口/SNI/UUID/落地机)"
+        echo " 7. 测试落地机连通性与握手延迟"
+        echo " 8. TCP BBR 加速状态与管理"
+        echo " 9. 检查与升级 (Xray内核 / 管理脚本)"
+        echo " 10. 查看运行日志"
+        echo " 11. 彻底卸载 Xray"
+        echo " 0. 退出菜单"
+        echo "=========================================="
+        read -p "请输入选项 [0-11]: " choice </dev/tty
+        case "$choice" in
+            1) restart_xray ;;
+            2) start_xray ;;
+            3) stop_xray ;;
+            4) show_info ;;
+            5) show_traffic_menu ;;
+            6) modify_config ;;
+            7) test_landing_server ;;
+            8) manage_bbr ;;
+            9) update_menu ;;
+            10) show_logs ;;
+            11) uninstall_xray ;;
+            0) clear; exit 0 ;;
+            *) echo -e "\033[31m无效输入！\033[0m"; sleep 1 ;;
+        esac
+    done
+}
+
+main_menu
 EOF_MANAGEMENT_SCRIPT
     chmod +x /usr/local/bin/xray
 }
