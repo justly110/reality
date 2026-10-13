@@ -3,7 +3,7 @@
 # VLESS-Reality 分流中转版 (Debian & Alpine + 纯IPv4单栈 + 本机/落地双用户分流)
 # 特性：
 # 1. 首页清晰显示管理脚本版本与 Xray 内核版本
-# 2. 支持一键添加与删除扩展 Reality 节点 (未占用端口随机分配)
+# 2. 支持一键添加与删除扩展 Reality 节点 (声明式重构，0损坏风险)
 # 3. 每 2 分钟极速存盘 + 支持终端直接执行 `xray -s` 瞬时存盘
 # 4. 重启/停止前强制自动存盘 (杜绝丢漏统计)
 # 5. 默认每月 24 日重置月度流量 (持久化存盘，进程重启不丢失)
@@ -15,13 +15,14 @@
 # 11. Xray 内核与管理脚本在线独立检查升级
 # ==============================================================================
 
-SCRIPT_VERSION="0.0.7"
+SCRIPT_VERSION="0.0.8"
 SCRIPT_URL="https://github.com/justly110/reality/raw/main/xray.sh"
 
 ENV_FILE="/usr/local/etc/xray/params.env"
 CONFIG_FILE="/usr/local/etc/xray/config.json"
 LINK_FILE="/usr/local/etc/xray/link.txt"
 TRAFFIC_FILE="/usr/local/etc/xray/traffic.env"
+EXTRA_NODES_FILE="/usr/local/etc/xray/extra_nodes.env"
 XRAY_BIN="/usr/local/bin/xray-core"
 
 if [ "$(id -u)" != "0" ]; then
@@ -143,8 +144,42 @@ build_inbounds_json() {
       "address": "127.0.0.1"
     }
   }
-]
 EOF
+
+    # 循环追加所有扩展 Reality 节点（保证 JSON 语法永远 100% 正确）
+    if [ -f "$EXTRA_NODES_FILE" ]; then
+        while IFS='|' read -r e_port e_uuid e_sid e_sni e_tag; do
+            [ -z "$e_port" ] && continue
+            cat << EOF
+  ,
+  {
+    "tag": "reality-in-$e_port",
+    "listen": "0.0.0.0",
+    "port": $e_port,
+    "protocol": "vless",
+    "settings": {
+      "clients": [
+        {"id": "$e_uuid", "flow": "xtls-rprx-vision", "email": "user-$e_port"}
+      ],
+      "decryption": "none"
+    },
+    "streamSettings": {
+      "network": "tcp",
+      "security": "reality",
+      "realitySettings": {
+        "dest": "$e_sni:443",
+        "serverNames": ["$e_sni"],
+        "privateKey": "$priv",
+        "shortIds": ["$e_sid"]
+      }
+    },
+    "sniffing": {"enabled": true, "destOverride": ["http", "tls"]}
+  }
+EOF
+        done < "$EXTRA_NODES_FILE"
+    fi
+
+    echo "]"
 }
 
 render_config_json() {
@@ -329,7 +364,7 @@ update_links_info() {
         echo "【主节点 2：落地转发 (relay-egress -> Shadowsocks)】"
         echo "● 节点链接: ${l_relay}"
         echo "--------------------------------------------------------------------------"
-        echo "详细参数："
+        echo "主节点详细参数："
         echo "- 本机 IPv4: ${s_v4:-未检测到 (需手动替换)}"
         echo "- Reality 端口: ${PORT}"
         echo "- 伪装域名 (SNI): ${DEST_SNI}"
@@ -342,6 +377,18 @@ update_links_info() {
         echo "- 落地地址: ${SS_ADDR}:${SS_PORT}"
         echo "- 加密方式: ${SS_METHOD}"
         echo "- 落地密码: ${SS_PASS}"
+
+        if [ -f "$EXTRA_NODES_FILE" ] && [ -s "$EXTRA_NODES_FILE" ]; then
+            echo "=========================================================================="
+            echo "【扩展 Reality 节点列表】"
+            while IFS='|' read -r e_port e_uuid e_sid e_sni e_tag; do
+                [ -z "$e_port" ] && continue
+                local e_link="vless://${e_uuid}@${host_v4}:${e_port}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=chrome&type=tcp&flow=xtls-rprx-vision&sni=${e_sni}&sid=${e_sid}#${e_tag}"
+                echo ""
+                echo "● 扩展节点: ${e_tag} (端口: ${e_port})"
+                echo "  链接: ${e_link}"
+            done < "$EXTRA_NODES_FILE"
+        fi
         echo "=========================================================================="
     } > "$LINK_FILE"
 }
@@ -353,13 +400,14 @@ write_management_cli() {
     cat > /usr/local/bin/xray << 'EOF_MANAGEMENT_SCRIPT'
 #!/bin/bash
 
-SCRIPT_VERSION="0.0.7"
+SCRIPT_VERSION="0.0.8"
 SCRIPT_URL="https://github.com/justly110/reality/raw/main/xray.sh"
 
 ENV_FILE="/usr/local/etc/xray/params.env"
 CONFIG_FILE="/usr/local/etc/xray/config.json"
 LINK_FILE="/usr/local/etc/xray/link.txt"
 TRAFFIC_FILE="/usr/local/etc/xray/traffic.env"
+EXTRA_NODES_FILE="/usr/local/etc/xray/extra_nodes.env"
 XRAY_BIN="/usr/local/bin/xray-core"
 
 load_env() {
@@ -405,7 +453,6 @@ get_xray_core_version() {
     [ -n "$v" ] && echo "$v" || echo "未知"
 }
 
-# ----------------- 流量统计、同步与熔断核心 -----------------
 format_bytes() {
     local b="${1:-0}"
     awk -v b="$b" 'BEGIN {
@@ -416,6 +463,7 @@ format_bytes() {
     }'
 }
 
+# ----------------- 流量统计、同步与熔断核心 -----------------
 sync_traffic_data() {
     load_traffic_env
     local cur_y=$(date +%Y)
@@ -614,8 +662,8 @@ is_port_in_use() {
 get_random_unused_port() {
     local p=0
     while true; do
-        p=$(( 20000 + RANDOM % 20001 )) # 20000 - 40000
-        if ! is_port_in_use "$p" && ! grep -q "\"port\": *$p" "$CONFIG_FILE" 2>/dev/null; then
+        p=$(( 20000 + RANDOM % 20001 ))
+        if ! is_port_in_use "$p" && ! grep -q "^$p|" "$EXTRA_NODES_FILE" 2>/dev/null; then
             echo "$p"
             return
         fi
@@ -638,8 +686,8 @@ add_reality_node() {
         echo -e "✔ 已自动分配空闲随机端口: \033[1;36m$final_port\033[0m"
     else
         if [[ "$user_port" =~ ^[0-9]+$ ]] && [ "$user_port" -ge 1 ] && [ "$user_port" -le 65535 ]; then
-            if is_port_in_use "$user_port" || grep -q "\"port\": *$user_port" "$CONFIG_FILE" 2>/dev/null; then
-                echo -e "\033[31m❌ 端口 $user_port 已被系统或其他节点占用！\033[0m"
+            if is_port_in_use "$user_port" || grep -q "^$user_port|" "$EXTRA_NODES_FILE" 2>/dev/null; then
+                echo -e "\033[31m❌ 端口 $user_port 已被占用！\033[0m"
                 read -n 1 -s -r -p "按任意键返回..." </dev/tty; return
             fi
             final_port="$user_port"
@@ -663,49 +711,16 @@ add_reality_node() {
     echo -e "\n⏳ 正在生成独立凭证并注入配置..."
     local new_uuid=$($XRAY_BIN uuid)
     local new_sid=$(openssl rand -hex 8)
-    local inb_tag="reality-in-${final_port}"
-    local user_email="user-${final_port}"
 
-    local new_inbound_json=$(cat << EOF
-    {
-      "tag": "$inb_tag",
-      "listen": "0.0.0.0",
-      "port": $final_port,
-      "protocol": "vless",
-      "settings": {
-        "clients": [
-          {"id": "$new_uuid", "flow": "xtls-rprx-vision", "email": "$user_email"}
-        ],
-        "decryption": "none"
-      },
-      "streamSettings": {
-        "network": "tcp",
-        "security": "reality",
-        "realitySettings": {
-          "dest": "$final_sni:443",
-          "serverNames": ["$final_sni"],
-          "privateKey": "$PRIVATE_KEY",
-          "shortIds": ["$new_sid"]
-        }
-      },
-      "sniffing": {"enabled": true, "destOverride": ["http", "tls"]}
-    },
-EOF
-)
+    # 声明式存入 extra_nodes.env
+    echo "${final_port}|${new_uuid}|${new_sid}|${final_sni}|${final_tag}" >> "$EXTRA_NODES_FILE"
 
-    sed -i "/\"inbounds\": *\[/r /dev/stdin" "$CONFIG_FILE" <<< "$new_inbound_json"
-    do_restart
-    sleep 1
+    # 全量重建合法 JSON，杜绝文本替换导致语法破损
+    rebuild_and_apply
 
     local s_v4=$(curl -s4 -m 5 ip.sb 2>/dev/null || curl -s4 -m 5 ifconfig.me 2>/dev/null || curl -s4 -m 5 api.ipify.org 2>/dev/null)
     local host_v4="${s_v4:-你的本机IPv4}"
     local new_link="vless://${new_uuid}@${host_v4}:${final_port}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=chrome&type=tcp&flow=xtls-rprx-vision&sni=${final_sni}&sid=${new_sid}#${final_tag}"
-
-    {
-        echo ""
-        echo "【扩展节点：${final_tag} (端口: ${final_port})】"
-        echo "● 节点链接: ${new_link}"
-    } >> "$LINK_FILE"
 
     clear
     echo "=========================================="
@@ -720,7 +735,7 @@ EOF
     echo "● 节点链接: "
     echo "$new_link"
     echo "=========================================="
-    echo "提示：链接已自动追加保存至 $LINK_FILE ，可在主菜单第 4 项随时查看。"
+    echo "提示：链接已自动保存，可在主菜单第 4 项随时查看。"
     echo ""
     read -n 1 -s -r -p "按任意键返回管理菜单..." </dev/tty
 }
@@ -732,10 +747,7 @@ delete_reality_node() {
     echo "         删除扩展 Reality 节点            "
     echo "=========================================="
 
-    # 获取所有以 reality-in- 开头的端口列表
-    local ext_tags=($(grep -o '"tag": *"reality-in-[0-9]\+"' "$CONFIG_FILE" 2>/dev/null | awk -F'"' '{print $4}'))
-
-    if [ ${#ext_tags[@]} -eq 0 ]; then
+    if [ ! -f "$EXTRA_NODES_FILE" ] || [ ! -s "$EXTRA_NODES_FILE" ]; then
         echo -e "\033[33m当前没有可删除的扩展节点（主节点受保护不可在此删除）。\033[0m"
         echo "=========================================="
         read -n 1 -s -r -p "按任意键返回管理菜单..." </dev/tty
@@ -745,12 +757,12 @@ delete_reality_node() {
     echo "当前已添加的扩展节点列表："
     local idx=1
     local ports_arr=()
-    for tag in "${ext_tags[@]}"; do
-        local p="${tag#reality-in-}"
-        ports_arr+=("$p")
-        echo " [$idx] 端口: $p | Inbound Tag: $tag"
+    while IFS='|' read -r e_port e_uuid e_sid e_sni e_tag; do
+        [ -z "$e_port" ] && continue
+        ports_arr+=("$e_port")
+        echo " [$idx] 端口: $e_port | 标签: $e_tag | 伪装SNI: $e_sni"
         ((idx++))
-    done
+    done < "$EXTRA_NODES_FILE"
 
     echo "------------------------------------------"
     read -p "请输入要删除的节点序号 [1-${#ports_arr[@]}] (输入 0 取消): " del_idx </dev/tty
@@ -766,44 +778,14 @@ delete_reality_node() {
     fi
 
     local target_port="${ports_arr[$((del_idx-1))]}"
-    local target_tag="reality-in-${target_port}"
 
     echo -e "\n⏳ 正在清理配置并重启服务..."
 
-    # 使用 awk 精准删除该 inbound 块 (从 "tag": "reality-in-PORT" 往前后的一整组大括号)
-    awk -v tag="$target_tag" '
-    BEGIN { inside = 0; buf = "" }
-    {
-        if ($0 ~ /\{/) {
-            buf = buf $0 "\n"
-            if ($0 ~ "\"tag\":[ ]*\"" tag "\"") inside = 1
-        } else if ($0 ~ /\}[, ]*$/) {
-            buf = buf $0 "\n"
-            if (inside == 1) {
-                # 丢弃匹配块
-                inside = 0
-                buf = ""
-            } else {
-                printf "%s", buf
-                buf = ""
-            }
-        } else {
-            if (inside == 0 && buf == "") {
-                print $0
-            } else {
-                buf = buf $0 "\n"
-                if ($0 ~ "\"tag\":[ ]*\"" tag "\"") inside = 1
-            }
-        }
-    }' "$CONFIG_FILE" > "${CONFIG_FILE}.tmp" && mv -f "${CONFIG_FILE}.tmp" "$CONFIG_FILE"
+    # 从 extra_nodes.env 移除该端口行
+    sed -i "/^${target_port}|/d" "$EXTRA_NODES_FILE"
 
-    # 从 link.txt 里移除对应端口的链接记录
-    if [ -f "$LINK_FILE" ]; then
-        sed -i "/端口: ${target_port}/,+1d" "$LINK_FILE" 2>/dev/null || true
-    fi
-
-    do_restart
-    sleep 1
+    # 全量重建配置，保证 JSON 结构 100% 合法
+    rebuild_and_apply
 
     echo -e "\033[32m✔ 已成功删除端口为 ${target_port} 的 Reality 节点！\033[0m"
     echo ""
@@ -935,7 +917,7 @@ verify_sni_health() {
 }
 
 # ----------------- 基础服务与节点重构 -----------------
-render_inbounds() {
+build_inbounds_json() {
     local port="$1"; local sni="$2"; local u_direct="$3"; local u_relay="$4"; local priv="$5"; local sid="$6"
     cat << EOF
 [
@@ -972,8 +954,41 @@ render_inbounds() {
       "address": "127.0.0.1"
     }
   }
-]
 EOF
+
+    if [ -f "$EXTRA_NODES_FILE" ]; then
+        while IFS='|' read -r e_port e_uuid e_sid e_sni e_tag; do
+            [ -z "$e_port" ] && continue
+            cat << EOF
+  ,
+  {
+    "tag": "reality-in-$e_port",
+    "listen": "0.0.0.0",
+    "port": $e_port,
+    "protocol": "vless",
+    "settings": {
+      "clients": [
+        {"id": "$e_uuid", "flow": "xtls-rprx-vision", "email": "user-$e_port"}
+      ],
+      "decryption": "none"
+    },
+    "streamSettings": {
+      "network": "tcp",
+      "security": "reality",
+      "realitySettings": {
+        "dest": "$e_sni:443",
+        "serverNames": ["$e_sni"],
+        "privateKey": "$priv",
+        "shortIds": ["$e_sid"]
+      }
+    },
+    "sniffing": {"enabled": true, "destOverride": ["http", "tls"]}
+  }
+EOF
+        done < "$EXTRA_NODES_FILE"
+    fi
+
+    echo "]"
 }
 
 rebuild_and_apply() {
@@ -987,7 +1002,7 @@ rebuild_and_apply() {
         echo '    "levels": {"0": {"statsUserUplink": true, "statsUserDownlink": true}},'
         echo '    "system": {"statsInboundUplink": true, "statsInboundDownlink": true}'
         echo '  },'
-        echo "  \"inbounds\": $(render_inbounds "$PORT" "$DEST_SNI" "$UUID_DIRECT" "$UUID_RELAY" "$PRIVATE_KEY" "$SHORT_ID"),"
+        echo "  \"inbounds\": $(build_inbounds_json "$PORT" "$DEST_SNI" "$UUID_DIRECT" "$UUID_RELAY" "$PRIVATE_KEY" "$SHORT_ID"),"
         echo '  "outbounds": ['
         echo '    {"protocol": "freedom", "tag": "direct"},'
         echo '    {"protocol": "blackhole", "tag": "block"},'
@@ -1032,6 +1047,7 @@ rebuild_and_apply() {
         echo '        "outboundTag": "direct"'
         echo '      },'
         echo '      {'
+        echo '        "type": "field",'
         echo '        "network": "tcp,udp",'
         echo '        "outboundTag": "direct"'
         echo '      }'
@@ -1072,7 +1088,7 @@ rebuild_and_apply() {
         echo "【主节点 2：落地转发 (relay-egress -> Shadowsocks)】"
         echo "● 节点链接: ${l_relay}"
         echo "--------------------------------------------------------------------------"
-        echo "详细参数："
+        echo "主节点详细参数："
         echo "- 本机 IPv4: ${s_v4:-未检测到 (需手动替换)}"
         echo "- Reality 端口: ${PORT}"
         echo "- 伪装域名 (SNI): ${DEST_SNI}"
@@ -1085,6 +1101,18 @@ rebuild_and_apply() {
         echo "- 落地地址: ${SS_ADDR}:${SS_PORT}"
         echo "- 加密方式: ${SS_METHOD}"
         echo "- 落地密码: ${SS_PASS}"
+
+        if [ -f "$EXTRA_NODES_FILE" ] && [ -s "$EXTRA_NODES_FILE" ]; then
+            echo "=========================================================================="
+            echo "【扩展 Reality 节点列表】"
+            while IFS='|' read -r e_port e_uuid e_sid e_sni e_tag; do
+                [ -z "$e_port" ] && continue
+                local e_link="vless://${e_uuid}@${host_v4}:${e_port}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=chrome&type=tcp&flow=xtls-rprx-vision&sni=${e_sni}&sid=${e_sid}#${e_tag}"
+                echo ""
+                echo "● 扩展节点: ${e_tag} (端口: ${e_port})"
+                echo "  链接: ${e_link}"
+            done < "$EXTRA_NODES_FILE"
+        fi
         echo "=========================================================================="
     } > "$LINK_FILE"
 
