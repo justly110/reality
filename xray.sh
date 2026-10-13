@@ -2,17 +2,20 @@
 # ==============================================================================
 # VLESS-Reality 分流中转版 (Debian & Alpine + 纯IPv4单栈 + 本机/落地双用户分流)
 # 特性：
-# 1. 智能配置检测与平滑升级 (已有配置免改参)
-# 2. 默认每月24日重置月度流量 (持久化存盘，进程重启不丢失)
-# 3. 默认 1000G 流量熔断保护 (双节点上行+下行合计未达 1000G 不熔断)
-# 4. 落地机 TCP 毫秒握手延迟与连通性测试
-# 5. TCP BBR 状态检测与环境识别 (支持机器开启，容器小鸡友好提示)
-# 6. 修改 SNI 伪装域名自动握手与证书体积极速体检
-# 7. 低内存 (<=256MB) 自动注入防 OOM 调优参数
-# 8. Xray 内核与管理脚本在线独立检查升级
+# 1. 首页清晰显示管理脚本版本与 Xray 内核版本
+# 2. 支持一键添加与删除扩展 Reality 节点 (未占用端口随机分配)
+# 3. 每 2 分钟极速存盘 + 支持终端直接执行 `xray -s` 瞬时存盘
+# 4. 重启/停止前强制自动存盘 (杜绝丢漏统计)
+# 5. 默认每月 24 日重置月度流量 (持久化存盘，进程重启不丢失)
+# 6. 默认 1000G 流量熔断保护 (双节点上行+下行合计未达 1000G 不熔断)
+# 7. 落地机 TCP 毫秒握手延迟与连通性测试
+# 8. TCP BBR 状态检测与环境识别 (支持机器开启，容器小鸡友好提示)
+# 9. 修改 SNI 伪装域名自动握手与证书体积极速体检
+# 10. 低内存 (<=256MB) 自动注入防 OOM 调优参数
+# 11. Xray 内核与管理脚本在线独立检查升级
 # ==============================================================================
 
-SCRIPT_VERSION="0.0.5"
+SCRIPT_VERSION="0.0.7"
 SCRIPT_URL="https://github.com/justly110/reality/raw/main/xray.sh"
 
 ENV_FILE="/usr/local/etc/xray/params.env"
@@ -295,11 +298,12 @@ EOF
         fi
     fi
 
+    # 配置 Cron 定时任务：每 2 分钟使用 xray -s 自动同步存盘
     if [ -d "/etc/cron.d" ]; then
-        echo "*/2 * * * * root /usr/local/bin/xray --sync-traffic >/dev/null 2>&1" > /etc/cron.d/xray-traffic
+        echo "*/2 * * * * root /usr/local/bin/xray -s >/dev/null 2>&1" > /etc/cron.d/xray-traffic
         chmod 644 /etc/cron.d/xray-traffic
     elif command -v crontab >/dev/null 2>&1; then
-        (crontab -l 2>/dev/null | grep -v "xray --sync-traffic"; echo "*/2 * * * * /usr/local/bin/xray --sync-traffic >/dev/null 2>&1") | crontab -
+        (crontab -l 2>/dev/null | grep -v "xray -s" | grep -v "xray --sync-traffic"; echo "*/2 * * * * /usr/local/bin/xray -s >/dev/null 2>&1") | crontab -
     fi
 
     if command -v rc-update >/dev/null 2>&1; then
@@ -317,12 +321,12 @@ update_links_info() {
 
     {
         echo "=========================================================================="
-        echo "🎉 VLESS-Reality 分流节点配置已就绪"
+        echo "🎉 VLESS-Reality 节点配置列表"
         echo "=========================================================================="
-        echo "【节点 1：本机直连 (direct-local)】"
+        echo "【主节点 1：本机直连 (direct-local)】"
         echo "● 节点链接: ${l_direct}"
         echo ""
-        echo "【节点 2：落地转发 (relay-egress -> Shadowsocks)】"
+        echo "【主节点 2：落地转发 (relay-egress -> Shadowsocks)】"
         echo "● 节点链接: ${l_relay}"
         echo "--------------------------------------------------------------------------"
         echo "详细参数："
@@ -349,7 +353,7 @@ write_management_cli() {
     cat > /usr/local/bin/xray << 'EOF_MANAGEMENT_SCRIPT'
 #!/bin/bash
 
-SCRIPT_VERSION="0.0.5"
+SCRIPT_VERSION="0.0.7"
 SCRIPT_URL="https://github.com/justly110/reality/raw/main/xray.sh"
 
 ENV_FILE="/usr/local/etc/xray/params.env"
@@ -396,16 +400,12 @@ get_status() {
     fi
 }
 
-do_restart() {
-    if command -v systemctl >/dev/null 2>&1; then systemctl restart xray; elif command -v rc-service >/dev/null 2>&1; then rc-service xray restart; fi
-}
-do_start() {
-    if command -v systemctl >/dev/null 2>&1; then systemctl start xray; elif command -v rc-service >/dev/null 2>&1; then rc-service xray start; fi
-}
-do_stop() {
-    if command -v systemctl >/dev/null 2>&1; then systemctl stop xray; elif command -v rc-service >/dev/null 2>&1; then rc-service xray stop; fi
+get_xray_core_version() {
+    local v=$($XRAY_BIN version 2>/dev/null | head -n 1 | awk '{print $2}')
+    [ -n "$v" ] && echo "$v" || echo "未知"
 }
 
+# ----------------- 流量统计、同步与熔断核心 -----------------
 format_bytes() {
     local b="${1:-0}"
     awk -v b="$b" 'BEGIN {
@@ -416,7 +416,6 @@ format_bytes() {
     }'
 }
 
-# ----------------- 流量统计、同步与熔断核心 -----------------
 sync_traffic_data() {
     load_traffic_env
     local cur_y=$(date +%Y)
@@ -430,7 +429,7 @@ sync_traffic_data() {
         if [ "$LAST_RESET_MONTH" != "$this_cycle_tag" ]; then
             U1_UP=0; U1_DOWN=0; U2_UP=0; U2_DOWN=0; LAST_RESET_MONTH="$this_cycle_tag"
             if [ "$FUSED" -eq 1 ]; then
-                FUSED=0; do_start
+                FUSED=0; do_start_raw
             fi
         fi
     fi
@@ -456,7 +455,7 @@ sync_traffic_data() {
         if [ "$total_bytes" -ge "$limit_bytes" ]; then
             if [ "$FUSED" -ne 1 ]; then
                 FUSED=1
-                do_stop
+                do_stop_raw
             fi
         fi
     fi
@@ -464,8 +463,24 @@ sync_traffic_data() {
     save_traffic_env
 }
 
-# 支持后台 cron 脚本直接调用
-if [ "$1" = "--sync-traffic" ]; then
+# 基础控制封装：重启和停止前先强制同步存盘（杜绝丢流量）
+do_restart() {
+    sync_traffic_data
+    if command -v systemctl >/dev/null 2>&1; then systemctl restart xray; elif command -v rc-service >/dev/null 2>&1; then rc-service xray restart; fi
+}
+do_start_raw() {
+    if command -v systemctl >/dev/null 2>&1; then systemctl start xray; elif command -v rc-service >/dev/null 2>&1; then rc-service xray start; fi
+}
+do_stop_raw() {
+    if command -v systemctl >/dev/null 2>&1; then systemctl stop xray; elif command -v rc-service >/dev/null 2>&1; then rc-service xray stop; fi
+}
+do_stop() {
+    sync_traffic_data
+    do_stop_raw
+}
+
+# 支持 -s 或 --sync-traffic 参数直接调用
+if [ "$1" = "-s" ] || [ "$1" = "--sync-traffic" ]; then
     sync_traffic_data
     exit 0
 fi
@@ -531,11 +546,11 @@ show_traffic_menu() {
             echo "【月度流量限额】: 未设置 (不限用量)"
         fi
         echo "------------------------------------------"
-        echo "【节点 1：本机直连 (direct-local)】"
+        echo "【主节点 1：本机直连 (direct-local)】"
         echo "  ↑ 上行: $(format_bytes $U1_UP) | ↓ 下行: $(format_bytes $U1_DOWN)"
         echo "  ∑ 合计: $(format_bytes $total_u1)"
         echo ""
-        echo "【节点 2：落地转发 (relay-egress)】"
+        echo "【主节点 2：落地转发 (relay-egress)】"
         echo "  ↑ 上行: $(format_bytes $U2_UP) | ↓ 下行: $(format_bytes $U2_DOWN)"
         echo "  ∑ 合计: $(format_bytes $total_u2)"
         echo "------------------------------------------"
@@ -574,7 +589,7 @@ show_traffic_menu() {
                 if [[ "$cf_rst" =~ ^[yY]$ ]]; then
                     U1_UP=0; U1_DOWN=0; U2_UP=0; U2_DOWN=0; FUSED=0
                     save_traffic_env
-                    do_start
+                    do_start_raw
                     echo -e "\033[32m✔ 流量已归零，服务已恢复！\033[0m"; sleep 1
                 fi
                 ;;
@@ -582,6 +597,217 @@ show_traffic_menu() {
             *) echo -e "\033[31m无效输入！\033[0m"; sleep 1 ;;
         esac
     done
+}
+
+# ----------------- 检查端口占用与生成未占用随机端口 -----------------
+is_port_in_use() {
+    local check_p="$1"
+    if command -v ss >/dev/null 2>&1; then
+        ss -tlnp 2>/dev/null | grep -qE ":${check_p}\b"
+    elif command -v netstat >/dev/null 2>&1; then
+        netstat -tlnp 2>/dev/null | grep -qE ":${check_p}\b"
+    else
+        lsof -i :"$check_p" >/dev/null 2>&1
+    fi
+}
+
+get_random_unused_port() {
+    local p=0
+    while true; do
+        p=$(( 20000 + RANDOM % 20001 )) # 20000 - 40000
+        if ! is_port_in_use "$p" && ! grep -q "\"port\": *$p" "$CONFIG_FILE" 2>/dev/null; then
+            echo "$p"
+            return
+        fi
+    done
+}
+
+# ----------------- 一键添加 Reality 节点 -----------------
+add_reality_node() {
+    load_env
+    clear
+    echo "=========================================="
+    echo "         一键添加新 Reality 节点          "
+    echo "=========================================="
+    echo "提示：回车留空端口将自动在 20000-40000 间随机挑选未占用的空闲端口。"
+    read -p "请输入新节点端口 (回车自动随机): " user_port </dev/tty
+
+    local final_port=""
+    if [ -z "$user_port" ]; then
+        final_port=$(get_random_unused_port)
+        echo -e "✔ 已自动分配空闲随机端口: \033[1;36m$final_port\033[0m"
+    else
+        if [[ "$user_port" =~ ^[0-9]+$ ]] && [ "$user_port" -ge 1 ] && [ "$user_port" -le 65535 ]; then
+            if is_port_in_use "$user_port" || grep -q "\"port\": *$user_port" "$CONFIG_FILE" 2>/dev/null; then
+                echo -e "\033[31m❌ 端口 $user_port 已被系统或其他节点占用！\033[0m"
+                read -n 1 -s -r -p "按任意键返回..." </dev/tty; return
+            fi
+            final_port="$user_port"
+        else
+            echo -e "\033[31m❌ 端口格式不合法！\033[0m"
+            read -n 1 -s -r -p "按任意键返回..." </dev/tty; return
+        fi
+    fi
+
+    echo "------------------------------------------"
+    read -p "请输入伪装域名 SNI (留空默认使用主节点 SNI: $DEST_SNI): " custom_sni </dev/tty
+    local final_sni="${custom_sni:-$DEST_SNI}"
+    if ! verify_sni_health "$final_sni"; then
+        echo -e "\033[31m已取消添加新节点。\033[0m"
+        read -n 1 -s -r -p "按任意键返回..." </dev/tty; return
+    fi
+
+    read -p "请输入节点备注名称 (默认: Reality-${final_port}): " custom_tag </dev/tty
+    local final_tag="${custom_tag:-Reality-${final_port}}"
+
+    echo -e "\n⏳ 正在生成独立凭证并注入配置..."
+    local new_uuid=$($XRAY_BIN uuid)
+    local new_sid=$(openssl rand -hex 8)
+    local inb_tag="reality-in-${final_port}"
+    local user_email="user-${final_port}"
+
+    local new_inbound_json=$(cat << EOF
+    {
+      "tag": "$inb_tag",
+      "listen": "0.0.0.0",
+      "port": $final_port,
+      "protocol": "vless",
+      "settings": {
+        "clients": [
+          {"id": "$new_uuid", "flow": "xtls-rprx-vision", "email": "$user_email"}
+        ],
+        "decryption": "none"
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "security": "reality",
+        "realitySettings": {
+          "dest": "$final_sni:443",
+          "serverNames": ["$final_sni"],
+          "privateKey": "$PRIVATE_KEY",
+          "shortIds": ["$new_sid"]
+        }
+      },
+      "sniffing": {"enabled": true, "destOverride": ["http", "tls"]}
+    },
+EOF
+)
+
+    sed -i "/\"inbounds\": *\[/r /dev/stdin" "$CONFIG_FILE" <<< "$new_inbound_json"
+    do_restart
+    sleep 1
+
+    local s_v4=$(curl -s4 -m 5 ip.sb 2>/dev/null || curl -s4 -m 5 ifconfig.me 2>/dev/null || curl -s4 -m 5 api.ipify.org 2>/dev/null)
+    local host_v4="${s_v4:-你的本机IPv4}"
+    local new_link="vless://${new_uuid}@${host_v4}:${final_port}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=chrome&type=tcp&flow=xtls-rprx-vision&sni=${final_sni}&sid=${new_sid}#${final_tag}"
+
+    {
+        echo ""
+        echo "【扩展节点：${final_tag} (端口: ${final_port})】"
+        echo "● 节点链接: ${new_link}"
+    } >> "$LINK_FILE"
+
+    clear
+    echo "=========================================="
+    echo -e "\033[32m🎉 新 Reality 节点添加成功！\033[0m"
+    echo "=========================================="
+    echo "端口 (Port)   : $final_port"
+    echo "伪装域名 (SNI): $final_sni"
+    echo "UUID          : $new_uuid"
+    echo "ShortId       : $new_sid"
+    echo "公钥 (pbk)    : $PUBLIC_KEY"
+    echo "------------------------------------------"
+    echo "● 节点链接: "
+    echo "$new_link"
+    echo "=========================================="
+    echo "提示：链接已自动追加保存至 $LINK_FILE ，可在主菜单第 4 项随时查看。"
+    echo ""
+    read -n 1 -s -r -p "按任意键返回管理菜单..." </dev/tty
+}
+
+# ----------------- 一键删除扩展 Reality 节点 -----------------
+delete_reality_node() {
+    clear
+    echo "=========================================="
+    echo "         删除扩展 Reality 节点            "
+    echo "=========================================="
+
+    # 获取所有以 reality-in- 开头的端口列表
+    local ext_tags=($(grep -o '"tag": *"reality-in-[0-9]\+"' "$CONFIG_FILE" 2>/dev/null | awk -F'"' '{print $4}'))
+
+    if [ ${#ext_tags[@]} -eq 0 ]; then
+        echo -e "\033[33m当前没有可删除的扩展节点（主节点受保护不可在此删除）。\033[0m"
+        echo "=========================================="
+        read -n 1 -s -r -p "按任意键返回管理菜单..." </dev/tty
+        return
+    fi
+
+    echo "当前已添加的扩展节点列表："
+    local idx=1
+    local ports_arr=()
+    for tag in "${ext_tags[@]}"; do
+        local p="${tag#reality-in-}"
+        ports_arr+=("$p")
+        echo " [$idx] 端口: $p | Inbound Tag: $tag"
+        ((idx++))
+    done
+
+    echo "------------------------------------------"
+    read -p "请输入要删除的节点序号 [1-${#ports_arr[@]}] (输入 0 取消): " del_idx </dev/tty
+
+    if [ "$del_idx" = "0" ] || [ -z "$del_idx" ]; then
+        return
+    fi
+
+    if ! [[ "$del_idx" =~ ^[0-9]+$ ]] || [ "$del_idx" -lt 1 ] || [ "$del_idx" -gt "${#ports_arr[@]}" ]; then
+        echo -e "\033[31m无效的选择序号！\033[0m"
+        sleep 1
+        return
+    fi
+
+    local target_port="${ports_arr[$((del_idx-1))]}"
+    local target_tag="reality-in-${target_port}"
+
+    echo -e "\n⏳ 正在清理配置并重启服务..."
+
+    # 使用 awk 精准删除该 inbound 块 (从 "tag": "reality-in-PORT" 往前后的一整组大括号)
+    awk -v tag="$target_tag" '
+    BEGIN { inside = 0; buf = "" }
+    {
+        if ($0 ~ /\{/) {
+            buf = buf $0 "\n"
+            if ($0 ~ "\"tag\":[ ]*\"" tag "\"") inside = 1
+        } else if ($0 ~ /\}[, ]*$/) {
+            buf = buf $0 "\n"
+            if (inside == 1) {
+                # 丢弃匹配块
+                inside = 0
+                buf = ""
+            } else {
+                printf "%s", buf
+                buf = ""
+            }
+        } else {
+            if (inside == 0 && buf == "") {
+                print $0
+            } else {
+                buf = buf $0 "\n"
+                if ($0 ~ "\"tag\":[ ]*\"" tag "\"") inside = 1
+            }
+        }
+    }' "$CONFIG_FILE" > "${CONFIG_FILE}.tmp" && mv -f "${CONFIG_FILE}.tmp" "$CONFIG_FILE"
+
+    # 从 link.txt 里移除对应端口的链接记录
+    if [ -f "$LINK_FILE" ]; then
+        sed -i "/端口: ${target_port}/,+1d" "$LINK_FILE" 2>/dev/null || true
+    fi
+
+    do_restart
+    sleep 1
+
+    echo -e "\033[32m✔ 已成功删除端口为 ${target_port} 的 Reality 节点！\033[0m"
+    echo ""
+    read -n 1 -s -r -p "按任意键返回管理菜单..." </dev/tty
 }
 
 # ----------------- 落地机连通性与握手延迟测试 -----------------
@@ -806,7 +1032,6 @@ rebuild_and_apply() {
         echo '        "outboundTag": "direct"'
         echo '      },'
         echo '      {'
-        echo '        "type": "field",'
         echo '        "network": "tcp,udp",'
         echo '        "outboundTag": "direct"'
         echo '      }'
@@ -839,12 +1064,12 @@ rebuild_and_apply() {
 
     {
         echo "=========================================================================="
-        echo "🎉 VLESS-Reality 最新节点信息"
+        echo "🎉 VLESS-Reality 节点配置列表"
         echo "=========================================================================="
-        echo "【节点 1：本机直连 (direct-local)】"
+        echo "【主节点 1：本机直连 (direct-local)】"
         echo "● 节点链接: ${l_direct}"
         echo ""
-        echo "【节点 2：落地转发 (relay-egress -> Shadowsocks)】"
+        echo "【主节点 2：落地转发 (relay-egress -> Shadowsocks)】"
         echo "● 节点链接: ${l_relay}"
         echo "--------------------------------------------------------------------------"
         echo "详细参数："
@@ -882,7 +1107,7 @@ modify_config() {
         echo " 2. 修改 Reality 伪装域名 SNI (带自动体检，当前: $DEST_SNI)"
         echo " 3. 重新生成 Reality 密钥对(Keypair)及 ShortID"
         echo "------------------------------------------"
-        echo " [用户 UUID 管理]"
+        echo " [主节点 UUID 管理]"
         echo " 4. 重新生成【本机直连】UUID"
         echo " 5. 重新生成【落地转发】UUID"
         echo " 6. 手动输入新的【本机直连】UUID"
@@ -964,7 +1189,7 @@ check_and_update_core() {
     echo "=========================================="
     echo "           检查 Xray 内核更新             "
     echo "=========================================="
-    local cur_ver=$($XRAY_BIN version 2>/dev/null | head -n 1 | awk '{print $2}')
+    local cur_ver=$(get_xray_core_version)
     cur_ver="v${cur_ver#v}"
     echo "正在获取官方最新版本信息..."
     local latest_ver=$(curl -sL -m 8 -o /dev/null -w %{url_effective} https://github.com/XTLS/Xray-core/releases/latest | grep -oE '[^/]+$')
@@ -1070,7 +1295,7 @@ update_menu() {
 }
 
 restart_xray() { echo -e "\n正在重启 Xray..."; do_restart; sleep 1; echo -e "\033[32m重启完成！\033[0m"; read -n 1 -s -r -p "按任意键继续..." </dev/tty; }
-start_xray() { echo -e "\n正在启动 Xray..."; do_start; sleep 1; echo -e "\033[32m启动完成！\033[0m"; read -n 1 -s -r -p "按任意键继续..." </dev/tty; }
+start_xray() { echo -e "\n正在启动 Xray..."; do_start_raw; sleep 1; echo -e "\033[32m启动完成！\033[0m"; read -n 1 -s -r -p "按任意键继续..." </dev/tty; }
 stop_xray() { echo -e "\n正在停止 Xray..."; do_stop; sleep 1; echo -e "\033[33m已停止！\033[0m"; read -n 1 -s -r -p "按任意键继续..." </dev/tty; }
 show_info() { clear; [ -f "$LINK_FILE" ] && cat "$LINK_FILE" || echo "未找到节点信息！"; echo ""; read -n 1 -s -r -p "按任意键返回菜单..." </dev/tty; }
 show_logs() {
@@ -1096,7 +1321,7 @@ uninstall_xray() {
                 rm -f /etc/init.d/xray
             fi
             rm -f /etc/cron.d/xray-traffic 2>/dev/null || true
-            crontab -l 2>/dev/null | grep -v "xray --sync-traffic" | crontab - 2>/dev/null || true
+            crontab -l 2>/dev/null | grep -v "xray -s" | grep -v "xray --sync-traffic" | crontab - 2>/dev/null || true
             rm -f /usr/local/bin/xray-core /usr/local/bin/xray
             rm -rf /usr/local/etc/xray /root/xray_temp
             echo -e "\033[32m🎉 卸载清理完成！\033[0m"
@@ -1115,39 +1340,45 @@ main_menu() {
         local total_cur=$((U1_UP + U1_DOWN + U2_UP + U2_DOWN))
         local lim_str="${TRAFFIC_LIMIT_GB:-1000} GB"
         [ "${TRAFFIC_LIMIT_GB:-1000}" -eq 0 ] && lim_str="不限"
+        local core_v=$(get_xray_core_version)
 
         echo "=========================================="
         echo "      Xray-Reality 流量分流管理后台       "
         echo "=========================================="
+        echo -e "程序版本: 脚本 \033[1;36mv${SCRIPT_VERSION}\033[0m | 内核 \033[1;32mv${core_v#v}\033[0m"
         echo -e "服务状态: $(get_status)"
         echo -e "月度流量: 已用 \033[1;33m$(format_bytes $total_cur)\033[0m / 限额 ${lim_str} (重置日: 每月 ${RESET_DAY:-24} 号)"
         echo "------------------------------------------"
         echo " 1. 重启 Xray"
         echo " 2. 启动 Xray"
         echo " 3. 停止 Xray"
-        echo " 4. 查看节点链接及详细信息"
+        echo " 4. 查看全部节点链接及详细配置"
         echo " 5. 查看月度流量统计与熔断设置"
-        echo " 6. 修改节点配置 (独立修改端口/SNI/UUID/落地机)"
-        echo " 7. 测试落地机连通性与握手延迟"
-        echo " 8. TCP BBR 加速状态与管理"
-        echo " 9. 检查与升级 (Xray内核 / 管理脚本)"
-        echo " 10. 查看运行日志"
-        echo " 11. 彻底卸载 Xray"
+        echo " 6. 一键添加新 Reality 节点 (支持自定义或随机端口)"
+        echo " 7. 一键删除扩展 Reality 节点"
+        echo " 8. 修改主节点配置 (端口/SNI/UUID/落地机)"
+        echo " 9. 测试落地机连通性与握手延迟"
+        echo " 10. TCP BBR 加速状态与管理"
+        echo " 11. 检查与升级 (Xray内核 / 管理脚本)"
+        echo " 12. 查看运行日志"
+        echo " 13. 彻底卸载 Xray"
         echo " 0. 退出菜单"
         echo "=========================================="
-        read -p "请输入选项 [0-11]: " choice </dev/tty
+        read -p "请输入选项 [0-13]: " choice </dev/tty
         case "$choice" in
             1) restart_xray ;;
             2) start_xray ;;
             3) stop_xray ;;
             4) show_info ;;
             5) show_traffic_menu ;;
-            6) modify_config ;;
-            7) test_landing_server ;;
-            8) manage_bbr ;;
-            9) update_menu ;;
-            10) show_logs ;;
-            11) uninstall_xray ;;
+            6) add_reality_node ;;
+            7) delete_reality_node ;;
+            8) modify_config ;;
+            9) test_landing_server ;;
+            10) manage_bbr ;;
+            11) update_menu ;;
+            12) show_logs ;;
+            13) uninstall_xray ;;
             0) clear; exit 0 ;;
             *) echo -e "\033[31m无效输入！\033[0m"; sleep 1 ;;
         esac
@@ -1180,7 +1411,7 @@ if is_config_complete; then
         mode_choice=1
     else
         echo "请选择运行模式："
-        echo "  1. 保留现有全部配置平滑升级 (推荐：自动补全月度流量/熔断/BBR/落地测速)"
+        echo "  1. 保留现有全部配置平滑升级 (推荐：自动补全节点增删/BBR/流量熔断)"
         echo "  2. 重新配置 (覆盖已有参数，重新输入落地机及生成新 UUID)"
         echo "----------------------------------------------------------"
         read -p "请输入选项 [1-2] (默认 1): " mode_choice </dev/tty
