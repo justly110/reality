@@ -15,7 +15,7 @@
 # 11. Xray 内核与管理脚本在线独立检查升级
 # ==============================================================================
 
-SCRIPT_VERSION="0.0.8"
+SCRIPT_VERSION="0.0.9"
 SCRIPT_URL="https://github.com/justly110/reality/raw/main/xray.sh"
 
 ENV_FILE="/usr/local/etc/xray/params.env"
@@ -30,12 +30,44 @@ if [ "$(id -u)" != "0" ]; then
     exit 1
 fi
 
-# 释放系统缓存
-sync; echo 3 2>/dev/null > /proc/sys/vm/drop_caches || true
-
 # ------------------------------------------------------------------------------
 # 1. 检查现有配置完整度
 # ------------------------------------------------------------------------------
+# JSON 字符串转义，防止密码/域名中的引号与反斜杠破坏 config.json
+json_escape() {
+    local s="$1"
+    s=${s//\\/\\\\}
+    s=${s//\"/\\\"}
+    s=${s//$'\n'/ }
+    s=${s//$'\r'/ }
+    s=${s//$'\t'/ }
+    printf '%s' "$s"
+}
+
+# 写入可被 source 的赋值行，值中的特殊字符一律转义
+env_quote() {
+    local s="$1"
+    s=${s//\\/\\\\}
+    s=${s//\"/\\\"}
+    s=${s//\$/\\\$}
+    s=${s//\`/\\\`}
+    s=${s//$'\n'/ }
+    printf '%s' "$s"
+}
+
+# 数字相加，避免 bash $(( )) 在大流量下溢出
+bytes_add() {
+    awk -v a="${1:-0}" -v b="${2:-0}" 'BEGIN { printf "%.0f", a + b }'
+}
+
+bytes_sum4() {
+    awk -v a="${1:-0}" -v b="${2:-0}" -v c="${3:-0}" -v d="${4:-0}" 'BEGIN { printf "%.0f", a + b + c + d }'
+}
+
+bytes_ge() {
+    awk -v a="${1:-0}" -v b="${2:-0}" 'BEGIN { exit !(a >= b) }'
+}
+
 is_config_complete() {
     [ -f "$ENV_FILE" ] || return 1
     local p_port p_sni p_u1 p_u2 p_pub p_priv p_sid p_ss_addr p_ss_port p_ss_pass p_ss_method
@@ -109,6 +141,12 @@ build_inbounds_json() {
     local priv="$5"
     local sid="$6"
 
+    sni=$(json_escape "$sni")
+    u_direct=$(json_escape "$u_direct")
+    u_relay=$(json_escape "$u_relay")
+    priv=$(json_escape "$priv")
+    sid=$(json_escape "$sid")
+
     cat << EOF
 [
   {
@@ -140,9 +178,8 @@ build_inbounds_json() {
     "listen": "127.0.0.1",
     "port": 10085,
     "protocol": "dokodemo-door",
-    "settings": {
-      "address": "127.0.0.1"
-    }
+    "settings": {"address": "127.0.0.1"},
+    "streamSettings": {"network": "tcp"}
   }
 EOF
 
@@ -150,6 +187,9 @@ EOF
     if [ -f "$EXTRA_NODES_FILE" ]; then
         while IFS='|' read -r e_port e_uuid e_sid e_sni e_tag; do
             [ -z "$e_port" ] && continue
+            e_uuid=$(json_escape "$e_uuid")
+            e_sid=$(json_escape "$e_sid")
+            e_sni=$(json_escape "$e_sni")
             cat << EOF
   ,
   {
@@ -202,10 +242,10 @@ render_config_json() {
         echo '      "settings": {'
         echo '        "servers": ['
         echo '          {'
-        echo "            \"address\": \"$SS_ADDR\","
+        echo "            \"address\": \"$(json_escape "$SS_ADDR")\","
         echo "            \"port\": $SS_PORT,"
-        echo "            \"method\": \"$SS_METHOD\","
-        echo "            \"password\": \"$SS_PASS\""
+        echo "            \"method\": \"$(json_escape "$SS_METHOD")\","
+        echo "            \"password\": \"$(json_escape "$SS_PASS")\""
         echo '          }'
         echo '        ]'
         echo '      },'
@@ -400,7 +440,7 @@ write_management_cli() {
     cat > /usr/local/bin/xray << 'EOF_MANAGEMENT_SCRIPT'
 #!/bin/bash
 
-SCRIPT_VERSION="0.0.8"
+SCRIPT_VERSION="0.0.9"
 SCRIPT_URL="https://github.com/justly110/reality/raw/main/xray.sh"
 
 ENV_FILE="/usr/local/etc/xray/params.env"
@@ -410,12 +450,62 @@ TRAFFIC_FILE="/usr/local/etc/xray/traffic.env"
 EXTRA_NODES_FILE="/usr/local/etc/xray/extra_nodes.env"
 XRAY_BIN="/usr/local/bin/xray-core"
 
+json_escape() {
+    local s="$1"
+    s=${s//\\/\\\\}
+    s=${s//\"/\\\"}
+    s=${s//$'\n'/ }
+    s=${s//$'\r'/ }
+    s=${s//$'\t'/ }
+    printf '%s' "$s"
+}
+
+env_quote() {
+    local s="$1"
+    s=${s//\\/\\\\}
+    s=${s//\"/\\\"}
+    s=${s//\$/\\\$}
+    s=${s//\`/\\\`}
+    s=${s//$'\n'/ }
+    printf '%s' "$s"
+}
+
+bytes_add() {
+    awk -v a="${1:-0}" -v b="${2:-0}" 'BEGIN { printf "%.0f", a + b }'
+}
+
+bytes_sum4() {
+    awk -v a="${1:-0}" -v b="${2:-0}" -v c="${3:-0}" -v d="${4:-0}" 'BEGIN { printf "%.0f", a + b + c + d }'
+}
+
+bytes_ge() {
+    awk -v a="${1:-0}" -v b="${2:-0}" 'BEGIN { exit !(a >= b) }'
+}
+
+# 扩展节点流量合计，数组为空时直接返回原值
+extra_bytes_total() {
+    local total="${1:-0}" i
+    [ "${#EX_UP[@]}" -eq 0 ] && { echo "$total"; return; }
+    for i in "${!EX_UP[@]}"; do
+        total=$(bytes_add "$total" "${EX_UP[$i]:-0}")
+        total=$(bytes_add "$total" "${EX_DOWN[$i]:-0}")
+    done
+    echo "$total"
+}
+
+day_of_month() {
+    local d
+    d=$(date +%d)
+    echo "$((10#$d))"
+}
+
 load_env() {
     if [ -f "$ENV_FILE" ]; then source "$ENV_FILE"; else echo "❌ 缺少 $ENV_FILE"; exit 1; fi
 }
 
 load_traffic_env() {
     RESET_DAY=24; TRAFFIC_LIMIT_GB=1000; LAST_RESET_MONTH=""; U1_UP=0; U1_DOWN=0; U2_UP=0; U2_DOWN=0; FUSED=0
+    EX_UP=(); EX_DOWN=()
     [ -f "$TRAFFIC_FILE" ] && source "$TRAFFIC_FILE"
 }
 
@@ -430,6 +520,14 @@ U2_UP=${U2_UP:-0}
 U2_DOWN=${U2_DOWN:-0}
 FUSED=${FUSED:-0}
 EOF
+    # 扩展节点流量按 extra_nodes.env 的行序存放，删除节点时同步剔除
+    local ex_i
+    if [ "${#EX_UP[@]}" -gt 0 ]; then
+        for ex_i in "${!EX_UP[@]}"; do
+            echo "EX_UP[$ex_i]=${EX_UP[$ex_i]:-0}" >> "$TRAFFIC_FILE"
+            echo "EX_DOWN[$ex_i]=${EX_DOWN[$ex_i]:-0}" >> "$TRAFFIC_FILE"
+        done
+    fi
 }
 
 get_status() {
@@ -464,21 +562,39 @@ format_bytes() {
 }
 
 # ----------------- 流量统计、同步与熔断核心 -----------------
-sync_traffic_data() {
-    load_traffic_env
+# 取本账单周期的起始标记：重置日及之后属于当月周期，之前属于上月周期
+cycle_tag_now() {
+    local r_day="${1:-24}"
     local cur_y=$(date +%Y)
     local cur_m=$(date +%m)
-    local cur_d=$(date +%-d)
+    local cur_d=$(day_of_month)
+    if [ "$cur_d" -ge "$r_day" ]; then
+        echo "${cur_y}-${cur_m}"
+    else
+        local prev_m=$((10#$cur_m - 1))
+        local prev_y=$cur_y
+        if [ "$prev_m" -lt 1 ]; then prev_m=12; prev_y=$((cur_y - 1)); fi
+        printf "%d-%02d" "$prev_y" "$prev_m"
+    fi
+}
+
+sync_traffic_data() {
+    load_traffic_env
     local r_day=${RESET_DAY:-24}
 
-    # 1. 检查是否达到设定的重置日 (例如 24 号)
-    if [ "$cur_d" -ge "$r_day" ]; then
-        local this_cycle_tag="${cur_y}-${cur_m}"
-        if [ "$LAST_RESET_MONTH" != "$this_cycle_tag" ]; then
-            U1_UP=0; U1_DOWN=0; U2_UP=0; U2_DOWN=0; LAST_RESET_MONTH="$this_cycle_tag"
-            if [ "$FUSED" -eq 1 ]; then
-                FUSED=0; do_start_raw
-            fi
+    # 1. 按账单周期补重置：即使重置日当天没开机，之后启动也会补上
+    local this_cycle_tag=$(cycle_tag_now "$r_day")
+    if [ "$LAST_RESET_MONTH" != "$this_cycle_tag" ]; then
+        U1_UP=0; U1_DOWN=0; U2_UP=0; U2_DOWN=0
+        local ex_idx
+        if [ "${#EX_UP[@]}" -gt 0 ]; then
+            for ex_idx in "${!EX_UP[@]}"; do
+                EX_UP[$ex_idx]=0; EX_DOWN[$ex_idx]=0
+            done
+        fi
+        LAST_RESET_MONTH="$this_cycle_tag"
+        if [ "$FUSED" -eq 1 ]; then
+            FUSED=0; do_start_raw
         fi
     fi
 
@@ -490,17 +606,30 @@ sync_traffic_data() {
         local delta_u2_up=$(echo "$query_out" | grep -A 2 'user>>>relay-egress>>>traffic>>>uplink' | grep '"value":' | awk '{print $2}' | tr -d '",')
         local delta_u2_down=$(echo "$query_out" | grep -A 2 'user>>>relay-egress>>>traffic>>>downlink' | grep '"value":' | awk '{print $2}' | tr -d '",')
 
-        U1_UP=$((U1_UP + ${delta_u1_up:-0}))
-        U1_DOWN=$((U1_DOWN + ${delta_u1_down:-0}))
-        U2_UP=$((U2_UP + ${delta_u2_up:-0}))
-        U2_DOWN=$((U2_DOWN + ${delta_u2_down:-0}))
+        U1_UP=$(bytes_add "$U1_UP" "${delta_u1_up:-0}")
+        U1_DOWN=$(bytes_add "$U1_DOWN" "${delta_u1_down:-0}")
+        U2_UP=$(bytes_add "$U2_UP" "${delta_u2_up:-0}")
+        U2_DOWN=$(bytes_add "$U2_DOWN" "${delta_u2_down:-0}")
+
+        # 扩展节点按 email user-<端口> 单独累计，避免被 -reset 直接丢弃
+        if [ -f "$EXTRA_NODES_FILE" ]; then
+            local ex_i=0 e_port e_rest delta_ex_up delta_ex_down
+            while IFS='|' read -r e_port e_rest; do
+                [ -z "$e_port" ] && continue
+                delta_ex_up=$(echo "$query_out" | grep -A 2 "user>>>user-${e_port}>>>traffic>>>uplink" | grep '"value":' | awk '{print $2}' | tr -d '",')
+                delta_ex_down=$(echo "$query_out" | grep -A 2 "user>>>user-${e_port}>>>traffic>>>downlink" | grep '"value":' | awk '{print $2}' | tr -d '",')
+                EX_UP[$ex_i]=$(bytes_add "${EX_UP[$ex_i]:-0}" "${delta_ex_up:-0}")
+                EX_DOWN[$ex_i]=$(bytes_add "${EX_DOWN[$ex_i]:-0}" "${delta_ex_down:-0}")
+                ex_i=$((ex_i + 1))
+            done < "$EXTRA_NODES_FILE"
+        fi
     fi
 
-    # 3. 超额熔断检查 (双节点 上行+下行 合计超过限额才熔断)
-    local total_bytes=$((U1_UP + U1_DOWN + U2_UP + U2_DOWN))
+    # 3. 超额熔断检查 (主节点 + 扩展节点 上行+下行 合计超过限额才熔断)
+    local total_bytes=$(extra_bytes_total "$(bytes_sum4 "$U1_UP" "$U1_DOWN" "$U2_UP" "$U2_DOWN")")
     if [ "${TRAFFIC_LIMIT_GB:-1000}" -gt 0 ]; then
-        local limit_bytes=$((TRAFFIC_LIMIT_GB * 1024 * 1024 * 1024))
-        if [ "$total_bytes" -ge "$limit_bytes" ]; then
+        local limit_bytes=$(awk -v g="${TRAFFIC_LIMIT_GB}" 'BEGIN { printf "%.0f", g * 1073741824 }')
+        if bytes_ge "$total_bytes" "$limit_bytes"; then
             if [ "$FUSED" -ne 1 ]; then
                 FUSED=1
                 do_stop_raw
@@ -538,7 +667,7 @@ get_cycle_range() {
     local r_day="${RESET_DAY:-24}"
     local cur_y=$(date +%Y)
     local cur_m=$(date +%m)
-    local cur_d=$(date +%-d)
+    local cur_d=$(day_of_month)
     local start_date=""
     local end_date=""
     local r_str=""
@@ -569,9 +698,19 @@ show_traffic_menu() {
         sync_traffic_data
         load_traffic_env
         clear
-        local total_u1=$((U1_UP + U1_DOWN))
-        local total_u2=$((U2_UP + U2_DOWN))
-        local grand_total=$((total_u1 + total_u2))
+        local total_u1=$(bytes_add "$U1_UP" "$U1_DOWN")
+        local total_u2=$(bytes_add "$U2_UP" "$U2_DOWN")
+        local grand_total=$(bytes_add "$total_u1" "$total_u2")
+        local ex_i e_port e_uuid e_sid e_sni e_tag
+        ex_i=0
+        if [ -f "$EXTRA_NODES_FILE" ]; then
+            while IFS='|' read -r e_port e_uuid e_sid e_sni e_tag; do
+                [ -z "$e_port" ] && continue
+                grand_total=$(bytes_add "$grand_total" "${EX_UP[$ex_i]:-0}")
+                grand_total=$(bytes_add "$grand_total" "${EX_DOWN[$ex_i]:-0}")
+                ex_i=$((ex_i + 1))
+            done < "$EXTRA_NODES_FILE"
+        fi
 
         echo "=========================================="
         echo "          月度流量统计与熔断设置          "
@@ -579,10 +718,9 @@ show_traffic_menu() {
         echo "【当前账单周期】: $(get_cycle_range)"
         echo "【每月重置日期】: 每月 ${RESET_DAY:-24} 日"
         if [ "${TRAFFIC_LIMIT_GB:-1000}" -gt 0 ]; then
-            local pct=$(awk -v cur="$grand_total" -v lim="$TRAFFIC_LIMIT_GB" 'BEGIN { printf "%.1f", (cur / (lim*1024*1024*1024)) * 100 }')
-            local limit_bytes=$((TRAFFIC_LIMIT_GB * 1024 * 1024 * 1024))
-            local rem_bytes=$((limit_bytes - grand_total))
-            [ "$rem_bytes" -lt 0 ] && rem_bytes=0
+            local pct=$(awk -v cur="$grand_total" -v lim="$TRAFFIC_LIMIT_GB" 'BEGIN { printf "%.1f", (cur / (lim*1073741824)) * 100 }')
+            local limit_bytes=$(awk -v g="$TRAFFIC_LIMIT_GB" 'BEGIN { printf "%.0f", g * 1073741824 }')
+            local rem_bytes=$(awk -v lim="$limit_bytes" -v cur="$grand_total" 'BEGIN { r = lim - cur; if (r < 0) r = 0; printf "%.0f", r }')
 
             echo "【月度流量限额】: ${TRAFFIC_LIMIT_GB} GB (双节点合计已用: ${pct}%，剩余可用: $(format_bytes $rem_bytes))"
             if [ "$FUSED" -eq 1 ]; then
@@ -601,6 +739,17 @@ show_traffic_menu() {
         echo "【主节点 2：落地转发 (relay-egress)】"
         echo "  ↑ 上行: $(format_bytes $U2_UP) | ↓ 下行: $(format_bytes $U2_DOWN)"
         echo "  ∑ 合计: $(format_bytes $total_u2)"
+        if [ -f "$EXTRA_NODES_FILE" ] && [ -s "$EXTRA_NODES_FILE" ]; then
+            echo "------------------------------------------"
+            ex_i=0
+            while IFS='|' read -r e_port e_uuid e_sid e_sni e_tag; do
+                [ -z "$e_port" ] && continue
+                echo "【扩展节点：${e_tag} (端口 ${e_port})】"
+                echo "  ↑ 上行: $(format_bytes ${EX_UP[$ex_i]:-0}) | ↓ 下行: $(format_bytes ${EX_DOWN[$ex_i]:-0})"
+                echo "  ∑ 合计: $(format_bytes $(bytes_add "${EX_UP[$ex_i]:-0}" "${EX_DOWN[$ex_i]:-0}"))"
+                ex_i=$((ex_i + 1))
+            done < "$EXTRA_NODES_FILE"
+        fi
         echo "------------------------------------------"
         echo -e "【双节点总计消耗】: \033[1;32m$(format_bytes $grand_total)\033[0m (上行+下行合计)"
         echo "=========================================="
@@ -636,6 +785,7 @@ show_traffic_menu() {
                 read -p "确认清零本周期全部已用流量并解除熔断？[y/N]: " cf_rst </dev/tty
                 if [[ "$cf_rst" =~ ^[yY]$ ]]; then
                     U1_UP=0; U1_DOWN=0; U2_UP=0; U2_DOWN=0; FUSED=0
+                    EX_UP=(); EX_DOWN=()
                     save_traffic_env
                     do_start_raw
                     echo -e "\033[32m✔ 流量已归零，服务已恢复！\033[0m"; sleep 1
@@ -650,13 +800,14 @@ show_traffic_menu() {
 # ----------------- 检查端口占用与生成未占用随机端口 -----------------
 is_port_in_use() {
     local check_p="$1"
-    if command -v ss >/dev/null 2>&1; then
-        ss -tlnp 2>/dev/null | grep -qE ":${check_p}\b"
-    elif command -v netstat >/dev/null 2>&1; then
-        netstat -tlnp 2>/dev/null | grep -qE ":${check_p}\b"
-    else
-        lsof -i :"$check_p" >/dev/null 2>&1
+    # 用 bash 自带的 /dev/tcp 探测，不依赖 ss/netstat/lsof 及其正则方言
+    if (echo >/dev/tcp/127.0.0.1/"$check_p") >/dev/null 2>&1; then
+        return 0
     fi
+    if (echo >/dev/tcp/0.0.0.0/"$check_p") >/dev/null 2>&1; then
+        return 0
+    fi
+    return 1
 }
 
 get_random_unused_port() {
@@ -778,8 +929,23 @@ delete_reality_node() {
     fi
 
     local target_port="${ports_arr[$((del_idx-1))]}"
+    local target_idx=$((del_idx - 1))
 
     echo -e "\n⏳ 正在清理配置并重启服务..."
+
+    # 同步移除该节点的流量记录，保持与 extra_nodes.env 行序一致
+    load_traffic_env
+    if [ "${#EX_UP[@]}" -gt 0 ]; then
+        local new_up=() new_down=() ex_i
+        for ex_i in "${!EX_UP[@]}"; do
+            [ "$ex_i" -eq "$target_idx" ] && continue
+            new_up+=("${EX_UP[$ex_i]}")
+            new_down+=("${EX_DOWN[$ex_i]}")
+        done
+        EX_UP=("${new_up[@]+"${new_up[@]}"}")
+        EX_DOWN=("${new_down[@]+"${new_down[@]}"}")
+        save_traffic_env
+    fi
 
     # 从 extra_nodes.env 移除该端口行
     sed -i "/^${target_port}|/d" "$EXTRA_NODES_FILE"
@@ -919,6 +1085,8 @@ verify_sni_health() {
 # ----------------- 基础服务与节点重构 -----------------
 build_inbounds_json() {
     local port="$1"; local sni="$2"; local u_direct="$3"; local u_relay="$4"; local priv="$5"; local sid="$6"
+    sni=$(json_escape "$sni"); u_direct=$(json_escape "$u_direct"); u_relay=$(json_escape "$u_relay")
+    priv=$(json_escape "$priv"); sid=$(json_escape "$sid")
     cat << EOF
 [
   {
@@ -950,15 +1118,15 @@ build_inbounds_json() {
     "listen": "127.0.0.1",
     "port": 10085,
     "protocol": "dokodemo-door",
-    "settings": {
-      "address": "127.0.0.1"
-    }
+    "settings": {"address": "127.0.0.1"},
+    "streamSettings": {"network": "tcp"}
   }
 EOF
 
     if [ -f "$EXTRA_NODES_FILE" ]; then
         while IFS='|' read -r e_port e_uuid e_sid e_sni e_tag; do
             [ -z "$e_port" ] && continue
+            e_uuid=$(json_escape "$e_uuid"); e_sid=$(json_escape "$e_sid"); e_sni=$(json_escape "$e_sni")
             cat << EOF
   ,
   {
@@ -1012,10 +1180,10 @@ rebuild_and_apply() {
         echo '      "settings": {'
         echo '        "servers": ['
         echo '          {'
-        echo "            \"address\": \"$SS_ADDR\","
+        echo "            \"address\": \"$(json_escape "$SS_ADDR")\","
         echo "            \"port\": $SS_PORT,"
-        echo "            \"method\": \"$SS_METHOD\","
-        echo "            \"password\": \"$SS_PASS\""
+        echo "            \"method\": \"$(json_escape "$SS_METHOD")\","
+        echo "            \"password\": \"$(json_escape "$SS_PASS")\""
         echo '          }'
         echo '        ]'
         echo '      },'
@@ -1057,17 +1225,17 @@ rebuild_and_apply() {
     } > "$CONFIG_FILE"
 
     {
-        echo "PORT=\"$PORT\""
-        echo "DEST_SNI=\"$DEST_SNI\""
-        echo "UUID_DIRECT=\"$UUID_DIRECT\""
-        echo "UUID_RELAY=\"$UUID_RELAY\""
-        echo "PUBLIC_KEY=\"$PUBLIC_KEY\""
-        echo "PRIVATE_KEY=\"$PRIVATE_KEY\""
-        echo "SHORT_ID=\"$SHORT_ID\""
-        echo "SS_ADDR=\"$SS_ADDR\""
-        echo "SS_PORT=\"$SS_PORT\""
-        echo "SS_PASS=\"$SS_PASS\""
-        echo "SS_METHOD=\"$SS_METHOD\""
+        echo "PORT=\"$(env_quote "$PORT")\""
+        echo "DEST_SNI=\"$(env_quote "$DEST_SNI")\""
+        echo "UUID_DIRECT=\"$(env_quote "$UUID_DIRECT")\""
+        echo "UUID_RELAY=\"$(env_quote "$UUID_RELAY")\""
+        echo "PUBLIC_KEY=\"$(env_quote "$PUBLIC_KEY")\""
+        echo "PRIVATE_KEY=\"$(env_quote "$PRIVATE_KEY")\""
+        echo "SHORT_ID=\"$(env_quote "$SHORT_ID")\""
+        echo "SS_ADDR=\"$(env_quote "$SS_ADDR")\""
+        echo "SS_PORT=\"$(env_quote "$SS_PORT")\""
+        echo "SS_PASS=\"$(env_quote "$SS_PASS")\""
+        echo "SS_METHOD=\"$(env_quote "$SS_METHOD")\""
     } > "$ENV_FILE"
 
     do_restart
@@ -1167,8 +1335,11 @@ modify_config() {
                 ;;
             3)
                 KEYS=$($XRAY_BIN x25519)
-                PRIVATE_KEY=$(echo "$KEYS" | awk '/Private/ {print $NF}')
-                PUBLIC_KEY=$(echo "$KEYS" | awk '/Public/ {print $NF}')
+                PRIVATE_KEY=$(echo "$KEYS" | awk '/^PrivateKey:/ {print $2}')
+                PUBLIC_KEY=$(echo "$KEYS" | awk '/PublicKey|Password/ {print $NF}')
+                if [ -z "$PRIVATE_KEY" ] || [ -z "$PUBLIC_KEY" ]; then
+                    echo -e "\033[31m密钥解析失败，已取消。\033[0m"; echo "$KEYS"; sleep 2; break
+                fi
                 SHORT_ID=$(openssl rand -hex 8)
                 rebuild_and_apply; break
                 ;;
@@ -1200,6 +1371,9 @@ modify_config() {
                 read -p "请输入落地机 IP/域名 (留空保持 $SS_ADDR): " b_addr </dev/tty
                 read -p "请输入落地机 端口 (留空保持 $SS_PORT): " b_port </dev/tty
                 read -p "请输入落地机 密码 (留空保持不变): " b_pass </dev/tty
+                if [ -n "$b_port" ] && ! [[ "$b_port" =~ ^[0-9]+$ && "$b_port" -ge 1 && "$b_port" -le 65535 ]]; then
+                    echo -e "\033[31m落地机端口不合法！\033[0m"; sleep 1; continue
+                fi
                 [ -n "$b_addr" ] && SS_ADDR="$b_addr"
                 [ -n "$b_port" ] && SS_PORT="$b_port"
                 [ -n "$b_pass" ] && SS_PASS="$b_pass"
@@ -1290,13 +1464,17 @@ check_and_update_script() {
     fi
 
     echo -e "\n⏳ 正在拉取最新脚本并平滑升级..."
-    if curl -sL "$SCRIPT_URL" -o /tmp/xray_new.sh; then
+    if curl -fsSL "$SCRIPT_URL" -o /tmp/xray_new.sh \
+        && grep -q '^SCRIPT_VERSION="' /tmp/xray_new.sh \
+        && grep -q 'write_management_cli' /tmp/xray_new.sh; then
         chmod +x /tmp/xray_new.sh
         bash /tmp/xray_new.sh --auto-upgrade </dev/tty
         rm -f /tmp/xray_new.sh
         echo -e "\033[32m🎉 管理脚本升级完成！\033[0m"
         exit 0
     fi
+    rm -f /tmp/xray_new.sh
+    echo -e "\033[31m❌ 下载内容校验失败，已取消升级。\033[0m"
     read -n 1 -s -r -p "按任意键返回..." </dev/tty
 }
 
@@ -1365,7 +1543,7 @@ main_menu() {
         sync_traffic_data
         load_traffic_env
         clear
-        local total_cur=$((U1_UP + U1_DOWN + U2_UP + U2_DOWN))
+        local total_cur=$(extra_bytes_total "$(bytes_sum4 "$U1_UP" "$U1_DOWN" "$U2_UP" "$U2_DOWN")")
         local lim_str="${TRAFFIC_LIMIT_GB:-1000} GB"
         [ "${TRAFFIC_LIMIT_GB:-1000}" -eq 0 ] && lim_str="不限"
         local core_v=$(get_xray_core_version)
@@ -1448,7 +1626,7 @@ if is_config_complete; then
 
     if [ "$mode_choice" = "1" ]; then
         echo -e "\n⏳ 正在执行无缝平滑升级（原节点链接完全保持不变）..."
-        [ ! -f "$XRAY_BIN" ] && install_xray_core
+        install_xray_core
         render_config_json
         write_service
         init_traffic_db
@@ -1481,25 +1659,30 @@ SS_METHOD="2022-blake3-aes-128-gcm"
 UUID_DIRECT=$($XRAY_BIN uuid)
 UUID_RELAY=$($XRAY_BIN uuid)
 KEYS=$($XRAY_BIN x25519)
-PRIVATE_KEY=$(echo "$KEYS" | awk '/Private/ {print $NF}')
-PUBLIC_KEY=$(echo "$KEYS" | awk '/Public/ {print $NF}')
+PRIVATE_KEY=$(echo "$KEYS" | awk '/^PrivateKey:/ {print $2}')
+PUBLIC_KEY=$(echo "$KEYS" | awk '/PublicKey|Password/ {print $NF}')
+if [ -z "$PRIVATE_KEY" ] || [ -z "$PUBLIC_KEY" ]; then
+    echo "❌ 密钥解析失败，xray x25519 输出格式无法识别："
+    echo "$KEYS"
+    exit 1
+fi
 SHORT_ID=$(openssl rand -hex 8)
 
 DEST_SNI="addons.mozilla.org"
 PORT=443
 
 {
-    echo "PORT=\"$PORT\""
-    echo "DEST_SNI=\"$DEST_SNI\""
-    echo "UUID_DIRECT=\"$UUID_DIRECT\""
-    echo "UUID_RELAY=\"$UUID_RELAY\""
-    echo "PUBLIC_KEY=\"$PUBLIC_KEY\""
-    echo "PRIVATE_KEY=\"$PRIVATE_KEY\""
-    echo "SHORT_ID=\"$SHORT_ID\""
-    echo "SS_ADDR=\"$SS_ADDR\""
-    echo "SS_PORT=\"$SS_PORT\""
-    echo "SS_PASS=\"$SS_PASS\""
-    echo "SS_METHOD=\"$SS_METHOD\""
+    echo "PORT=\"$(env_quote "$PORT")\""
+    echo "DEST_SNI=\"$(env_quote "$DEST_SNI")\""
+    echo "UUID_DIRECT=\"$(env_quote "$UUID_DIRECT")\""
+    echo "UUID_RELAY=\"$(env_quote "$UUID_RELAY")\""
+    echo "PUBLIC_KEY=\"$(env_quote "$PUBLIC_KEY")\""
+    echo "PRIVATE_KEY=\"$(env_quote "$PRIVATE_KEY")\""
+    echo "SHORT_ID=\"$(env_quote "$SHORT_ID")\""
+    echo "SS_ADDR=\"$(env_quote "$SS_ADDR")\""
+    echo "SS_PORT=\"$(env_quote "$SS_PORT")\""
+    echo "SS_PASS=\"$(env_quote "$SS_PASS")\""
+    echo "SS_METHOD=\"$(env_quote "$SS_METHOD")\""
 } > "$ENV_FILE"
 
 render_config_json
