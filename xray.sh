@@ -7,7 +7,7 @@
 # 3. 每 2 分钟极速存盘 + 支持终端直接执行 `xray -s` 瞬时存盘
 # 4. 重启/停止前强制自动存盘 (杜绝丢漏统计)
 # 5. 默认每月 24 日重置月度流量 (持久化存盘，进程重启不丢失)
-# 6. 默认 1000G 流量熔断保护 (双节点上行+下行合计未达 1000G 不熔断)
+# 6. 主节点与扩展节点流量独立统计，升级保留累计流量
 # 7. 落地机 TCP 毫秒握手延迟与连通性测试
 # 8. TCP BBR 状态检测与环境识别 (支持机器开启，容器小鸡友好提示)
 # 9. 修改 SNI 伪装域名自动握手与证书体积极速体检
@@ -15,7 +15,7 @@
 # 11. Xray 内核与管理脚本在线独立检查升级
 # ==============================================================================
 
-SCRIPT_VERSION="0.0.9"
+SCRIPT_VERSION="0.0.10"
 SCRIPT_URL="https://github.com/justly110/reality/raw/main/xray.sh"
 
 ENV_FILE="/usr/local/etc/xray/params.env"
@@ -62,10 +62,6 @@ bytes_add() {
 
 bytes_sum4() {
     awk -v a="${1:-0}" -v b="${2:-0}" -v c="${3:-0}" -v d="${4:-0}" 'BEGIN { printf "%.0f", a + b + c + d }'
-}
-
-bytes_ge() {
-    awk -v a="${1:-0}" -v b="${2:-0}" 'BEGIN { exit !(a >= b) }'
 }
 
 is_config_complete() {
@@ -359,18 +355,12 @@ init_traffic_db() {
     if [ ! -f "$TRAFFIC_FILE" ]; then
         cat > "$TRAFFIC_FILE" << 'EOF'
 RESET_DAY=24
-TRAFFIC_LIMIT_GB=1000
 LAST_RESET_MONTH=""
 U1_UP=0
 U1_DOWN=0
 U2_UP=0
 U2_DOWN=0
-FUSED=0
 EOF
-    else
-        if ! grep -q "TRAFFIC_LIMIT_GB" "$TRAFFIC_FILE" || grep -q "TRAFFIC_LIMIT_GB=0" "$TRAFFIC_FILE"; then
-            sed -i 's/TRAFFIC_LIMIT_GB=.*/TRAFFIC_LIMIT_GB=1000/' "$TRAFFIC_FILE" 2>/dev/null || echo "TRAFFIC_LIMIT_GB=1000" >> "$TRAFFIC_FILE"
-        fi
     fi
 
     # 配置 Cron 定时任务：每 2 分钟使用 xray -s 自动同步存盘
@@ -440,7 +430,7 @@ write_management_cli() {
     cat > /usr/local/bin/xray << 'EOF_MANAGEMENT_SCRIPT'
 #!/bin/bash
 
-SCRIPT_VERSION="0.0.9"
+SCRIPT_VERSION="0.0.10"
 SCRIPT_URL="https://github.com/justly110/reality/raw/main/xray.sh"
 
 ENV_FILE="/usr/local/etc/xray/params.env"
@@ -478,10 +468,6 @@ bytes_sum4() {
     awk -v a="${1:-0}" -v b="${2:-0}" -v c="${3:-0}" -v d="${4:-0}" 'BEGIN { printf "%.0f", a + b + c + d }'
 }
 
-bytes_ge() {
-    awk -v a="${1:-0}" -v b="${2:-0}" 'BEGIN { exit !(a >= b) }'
-}
-
 # 扩展节点流量合计，数组为空时直接返回原值
 extra_bytes_total() {
     local total="${1:-0}" i
@@ -504,30 +490,36 @@ load_env() {
 }
 
 load_traffic_env() {
-    RESET_DAY=24; TRAFFIC_LIMIT_GB=1000; LAST_RESET_MONTH=""; U1_UP=0; U1_DOWN=0; U2_UP=0; U2_DOWN=0; FUSED=0
+    RESET_DAY=24; LAST_RESET_MONTH=""; U1_UP=0; U1_DOWN=0; U2_UP=0; U2_DOWN=0
     EX_UP=(); EX_DOWN=()
     [ -f "$TRAFFIC_FILE" ] && source "$TRAFFIC_FILE"
 }
 
 save_traffic_env() {
-    cat > "$TRAFFIC_FILE" << EOF
+    # 在同一目录写临时文件后原子替换，避免读到写入一半的统计文件。
+    local traffic_tmp
+    traffic_tmp=$(mktemp "${TRAFFIC_FILE}.tmp.XXXXXX") || return 1
+    {
+    cat << EOF
 RESET_DAY=${RESET_DAY:-24}
-TRAFFIC_LIMIT_GB=${TRAFFIC_LIMIT_GB:-1000}
 LAST_RESET_MONTH="${LAST_RESET_MONTH}"
 U1_UP=${U1_UP:-0}
 U1_DOWN=${U1_DOWN:-0}
 U2_UP=${U2_UP:-0}
 U2_DOWN=${U2_DOWN:-0}
-FUSED=${FUSED:-0}
 EOF
     # 扩展节点流量按 extra_nodes.env 的行序存放，删除节点时同步剔除
     local ex_i
     if [ "${#EX_UP[@]}" -gt 0 ]; then
         for ex_i in "${!EX_UP[@]}"; do
-            echo "EX_UP[$ex_i]=${EX_UP[$ex_i]:-0}" >> "$TRAFFIC_FILE"
-            echo "EX_DOWN[$ex_i]=${EX_DOWN[$ex_i]:-0}" >> "$TRAFFIC_FILE"
+            echo "EX_UP[$ex_i]=${EX_UP[$ex_i]:-0}"
+            echo "EX_DOWN[$ex_i]=${EX_DOWN[$ex_i]:-0}"
         done
     fi
+    } > "$traffic_tmp" && mv -f "$traffic_tmp" "$TRAFFIC_FILE" || {
+        rm -f "$traffic_tmp"
+        return 1
+    }
 }
 
 get_status() {
@@ -535,13 +527,13 @@ get_status() {
         if systemctl is-active --quiet xray; then
             echo -e "\033[32m● 正在运行 (Running)\033[0m"
         else
-            [ "${FUSED:-0}" -eq 1 ] && echo -e "\033[31m⛔ 已熔断关停 (达限额保护)\033[0m" || echo -e "\033[31m○ 未运行 (Stopped)\033[0m"
+            echo -e "\033[31m○ 未运行 (Stopped)\033[0m"
         fi
     elif command -v rc-service >/dev/null 2>&1; then
         if rc-service xray status 2>/dev/null | grep -q "started"; then
             echo -e "\033[32m● 正在运行 (Running)\033[0m"
         else
-            [ "${FUSED:-0}" -eq 1 ] && echo -e "\033[31m⛔ 已熔断关停 (达限额保护)\033[0m" || echo -e "\033[31m○ 未运行 (Stopped)\033[0m"
+            echo -e "\033[31m○ 未运行 (Stopped)\033[0m"
         fi
     fi
 }
@@ -561,7 +553,7 @@ format_bytes() {
     }'
 }
 
-# ----------------- 流量统计、同步与熔断核心 -----------------
+# ----------------- 流量统计与同步核心 -----------------
 # 取本账单周期的起始标记：重置日及之后属于当月周期，之前属于上月周期
 cycle_tag_now() {
     local r_day="${1:-24}"
@@ -584,7 +576,10 @@ sync_traffic_data() {
 
     # 1. 按账单周期补重置：即使重置日当天没开机，之后启动也会补上
     local this_cycle_tag=$(cycle_tag_now "$r_day")
-    if [ "$LAST_RESET_MONTH" != "$this_cycle_tag" ]; then
+    if [ -z "$LAST_RESET_MONTH" ]; then
+        # 旧版本未保存周期标记时仅补齐标记，保留已有累计值。
+        LAST_RESET_MONTH="$this_cycle_tag"
+    elif [ "$LAST_RESET_MONTH" != "$this_cycle_tag" ]; then
         U1_UP=0; U1_DOWN=0; U2_UP=0; U2_DOWN=0
         local ex_idx
         if [ "${#EX_UP[@]}" -gt 0 ]; then
@@ -593,9 +588,6 @@ sync_traffic_data() {
             done
         fi
         LAST_RESET_MONTH="$this_cycle_tag"
-        if [ "$FUSED" -eq 1 ]; then
-            FUSED=0; do_start_raw
-        fi
     fi
 
     # 2. 调用 API 读取增量 (带 -reset=true 原子清空内存计数)
@@ -625,18 +617,6 @@ sync_traffic_data() {
         fi
     fi
 
-    # 3. 超额熔断检查 (主节点 + 扩展节点 上行+下行 合计超过限额才熔断)
-    local total_bytes=$(extra_bytes_total "$(bytes_sum4 "$U1_UP" "$U1_DOWN" "$U2_UP" "$U2_DOWN")")
-    if [ "${TRAFFIC_LIMIT_GB:-1000}" -gt 0 ]; then
-        local limit_bytes=$(awk -v g="${TRAFFIC_LIMIT_GB}" 'BEGIN { printf "%.0f", g * 1073741824 }')
-        if bytes_ge "$total_bytes" "$limit_bytes"; then
-            if [ "$FUSED" -ne 1 ]; then
-                FUSED=1
-                do_stop_raw
-            fi
-        fi
-    fi
-
     save_traffic_env
 }
 
@@ -659,7 +639,7 @@ do_stop() {
 # 支持 -s 或 --sync-traffic 参数直接调用
 if [ "$1" = "-s" ] || [ "$1" = "--sync-traffic" ]; then
     sync_traffic_data
-    exit 0
+    exit $?
 fi
 
 # 计算账单周期字符串
@@ -713,24 +693,10 @@ show_traffic_menu() {
         fi
 
         echo "=========================================="
-        echo "          月度流量统计与熔断设置          "
+        echo "          月度流量统计与重置设置          "
         echo "=========================================="
         echo "【当前账单周期】: $(get_cycle_range)"
         echo "【每月重置日期】: 每月 ${RESET_DAY:-24} 日"
-        if [ "${TRAFFIC_LIMIT_GB:-1000}" -gt 0 ]; then
-            local pct=$(awk -v cur="$grand_total" -v lim="$TRAFFIC_LIMIT_GB" 'BEGIN { printf "%.1f", (cur / (lim*1073741824)) * 100 }')
-            local limit_bytes=$(awk -v g="$TRAFFIC_LIMIT_GB" 'BEGIN { printf "%.0f", g * 1073741824 }')
-            local rem_bytes=$(awk -v lim="$limit_bytes" -v cur="$grand_total" 'BEGIN { r = lim - cur; if (r < 0) r = 0; printf "%.0f", r }')
-
-            echo "【月度流量限额】: ${TRAFFIC_LIMIT_GB} GB (双节点合计已用: ${pct}%，剩余可用: $(format_bytes $rem_bytes))"
-            if [ "$FUSED" -eq 1 ]; then
-                echo -e "【熔断防护状态】: \033[31m⛔ 已达 ${TRAFFIC_LIMIT_GB}GB 限额，触发自动停机保护！\033[0m"
-            else
-                echo -e "【熔断防护状态】: \033[32m✔ 正常运行中 (双节点合计未超额，无需熔断)\033[0m"
-            fi
-        else
-            echo "【月度流量限额】: 未设置 (不限用量)"
-        fi
         echo "------------------------------------------"
         echo "【主节点 1：本机直连 (direct-local)】"
         echo "  ↑ 上行: $(format_bytes $U1_UP) | ↓ 下行: $(format_bytes $U1_DOWN)"
@@ -751,19 +717,19 @@ show_traffic_menu() {
             done < "$EXTRA_NODES_FILE"
         fi
         echo "------------------------------------------"
-        echo -e "【双节点总计消耗】: \033[1;32m$(format_bytes $grand_total)\033[0m (上行+下行合计)"
+        echo -e "【全部节点总计消耗】: \033[1;32m$(format_bytes $grand_total)\033[0m (上行+下行合计)"
         echo "=========================================="
         echo " 1. 修改每月重置日期 (当前: 每月 ${RESET_DAY:-24} 号)"
-        echo " 2. 修改月度流量限额阈值 (当前: ${TRAFFIC_LIMIT_GB:-1000} GB)"
-        echo " 3. 手动清零当前周期流量 / 强制解除熔断"
+        echo " 2. 手动清零当前周期流量"
         echo " 0. 返回主管理菜单"
         echo "=========================================="
-        read -p "请输入选项 [0-3]: " t_opt </dev/tty
+        read -p "请输入选项 [0-2]: " t_opt </dev/tty
         case "$t_opt" in
             1)
                 read -p "请输入新的重置日 [1-31] (默认 24): " new_rday </dev/tty
                 if [[ "$new_rday" =~ ^[0-9]+$ ]] && [ "$new_rday" -ge 1 ] && [ "$new_rday" -le 31 ]; then
                     RESET_DAY="$new_rday"
+                    LAST_RESET_MONTH=$(cycle_tag_now "$RESET_DAY")
                     save_traffic_env
                     echo -e "\033[32m✔ 重置日已修改为每月 ${RESET_DAY} 日！\033[0m"; sleep 1
                 else
@@ -771,24 +737,13 @@ show_traffic_menu() {
                 fi
                 ;;
             2)
-                read -p "请输入每月流量限额 (单位 GB，默认 1000，输入 0 则不限制): " new_lim </dev/tty
-                new_lim=${new_lim:-1000}
-                if [[ "$new_lim" =~ ^[0-9]+$ ]]; then
-                    TRAFFIC_LIMIT_GB="$new_lim"
-                    save_traffic_env
-                    echo -e "\033[32m✔ 流量配额已更新为 ${TRAFFIC_LIMIT_GB} GB！\033[0m"; sleep 1
-                else
-                    echo -e "\033[31m输入不合法！\033[0m"; sleep 1
-                fi
-                ;;
-            3)
-                read -p "确认清零本周期全部已用流量并解除熔断？[y/N]: " cf_rst </dev/tty
+                read -p "确认清零本周期全部已用流量？[y/N]: " cf_rst </dev/tty
                 if [[ "$cf_rst" =~ ^[yY]$ ]]; then
-                    U1_UP=0; U1_DOWN=0; U2_UP=0; U2_DOWN=0; FUSED=0
+                    U1_UP=0; U1_DOWN=0; U2_UP=0; U2_DOWN=0
                     EX_UP=(); EX_DOWN=()
+                    LAST_RESET_MONTH=$(cycle_tag_now "${RESET_DAY:-24}")
                     save_traffic_env
-                    do_start_raw
-                    echo -e "\033[32m✔ 流量已归零，服务已恢复！\033[0m"; sleep 1
+                    echo -e "\033[32m✔ 流量已归零！\033[0m"; sleep 1
                 fi
                 ;;
             0) break ;;
@@ -1425,6 +1380,12 @@ check_and_update_core() {
     mkdir -p /tmp/xray_update
     if curl -sL -o /tmp/xray_update/xray.zip "https://github.com/XTLS/Xray-core/releases/download/${latest_ver}/${ZIP_NAME}"; then
         unzip -q -o /tmp/xray_update/xray.zip -d /tmp/xray_update/
+        # 替换内核前，先用现有内核读取并保存尚在内存中的流量。
+        if ! sync_traffic_data; then
+            echo "流量保存失败，已取消内核升级。"
+            rm -rf /tmp/xray_update
+            return 1
+        fi
         mv -f /tmp/xray_update/xray "$XRAY_BIN"
         chmod +x "$XRAY_BIN"
         rm -rf /tmp/xray_update
@@ -1468,7 +1429,11 @@ check_and_update_script() {
         && grep -q '^SCRIPT_VERSION="' /tmp/xray_new.sh \
         && grep -q 'write_management_cli' /tmp/xray_new.sh; then
         chmod +x /tmp/xray_new.sh
-        bash /tmp/xray_new.sh --auto-upgrade </dev/tty
+        if ! bash /tmp/xray_new.sh --auto-upgrade </dev/tty; then
+            rm -f /tmp/xray_new.sh
+            echo "管理脚本升级失败，请检查上方错误信息。"
+            return 1
+        fi
         rm -f /tmp/xray_new.sh
         echo -e "\033[32m🎉 管理脚本升级完成！\033[0m"
         exit 0
@@ -1544,8 +1509,6 @@ main_menu() {
         load_traffic_env
         clear
         local total_cur=$(extra_bytes_total "$(bytes_sum4 "$U1_UP" "$U1_DOWN" "$U2_UP" "$U2_DOWN")")
-        local lim_str="${TRAFFIC_LIMIT_GB:-1000} GB"
-        [ "${TRAFFIC_LIMIT_GB:-1000}" -eq 0 ] && lim_str="不限"
         local core_v=$(get_xray_core_version)
 
         echo "=========================================="
@@ -1553,13 +1516,13 @@ main_menu() {
         echo "=========================================="
         echo -e "程序版本: 脚本 \033[1;36mv${SCRIPT_VERSION}\033[0m | 内核 \033[1;32mv${core_v#v}\033[0m"
         echo -e "服务状态: $(get_status)"
-        echo -e "月度流量: 已用 \033[1;33m$(format_bytes $total_cur)\033[0m / 限额 ${lim_str} (重置日: 每月 ${RESET_DAY:-24} 号)"
+        echo -e "月度流量: 已用 \033[1;33m$(format_bytes $total_cur)\033[0m (重置日: 每月 ${RESET_DAY:-24} 号)"
         echo "------------------------------------------"
         echo " 1. 重启 Xray"
         echo " 2. 启动 Xray"
         echo " 3. 停止 Xray"
         echo " 4. 查看全部节点链接及详细配置"
-        echo " 5. 查看月度流量统计与熔断设置"
+        echo " 5. 查看月度流量统计与重置设置"
         echo " 6. 一键添加新 Reality 节点 (支持自定义或随机端口)"
         echo " 7. 一键删除扩展 Reality 节点"
         echo " 8. 修改主节点配置 (端口/SNI/UUID/落地机)"
@@ -1617,7 +1580,7 @@ if is_config_complete; then
         mode_choice=1
     else
         echo "请选择运行模式："
-        echo "  1. 保留现有全部配置平滑升级 (推荐：自动补全节点增删/BBR/流量熔断)"
+        echo "  1. 保留现有全部配置平滑升级 (保留节点及累计流量)"
         echo "  2. 重新配置 (覆盖已有参数，重新输入落地机及生成新 UUID)"
         echo "----------------------------------------------------------"
         read -p "请输入选项 [1-2] (默认 1): " mode_choice </dev/tty
@@ -1626,11 +1589,20 @@ if is_config_complete; then
 
     if [ "$mode_choice" = "1" ]; then
         echo -e "\n⏳ 正在执行无缝平滑升级（原节点链接完全保持不变）..."
-        install_xray_core
-        render_config_json
-        write_service
-        init_traffic_db
+        # 先部署修复后的统计逻辑，兼容旧统计文件中缺失的周期标记。
         write_management_cli
+        if ! /usr/local/bin/xray -s; then
+            echo "流量保存失败，已取消后续升级，未重启 Xray。"
+            exit 1
+        fi
+        init_traffic_db
+        # 在线更新管理脚本无需替换内核或重启服务，内存计数持续保留。
+        if [ "$1" != "--auto-upgrade" ]; then
+            install_xray_core
+            /usr/local/bin/xray -s || exit 1
+            render_config_json
+            write_service
+        fi
         update_links_info
         echo -e "\033[32m🎉 平滑升级完成！原有节点链接无需重新导入。\033[0m"
         echo -e "在终端直接输入 \033[1;33mxray\033[0m 即可体验新增功能。\n"
