@@ -14,7 +14,7 @@
 # 10. Xray 内核与管理脚本在线独立检查升级
 # ==============================================================================
 
-SCRIPT_VERSION="0.0.11"
+SCRIPT_VERSION="0.0.12"
 SCRIPT_URL="https://github.com/justly110/reality/raw/main/xray.sh"
 
 ENV_FILE="/usr/local/etc/xray/params.env"
@@ -228,21 +228,14 @@ render_config_json() {
         echo '  },'
         echo "  \"inbounds\": $(build_inbounds_json "$PORT" "$DEST_SNI" "$UUID_DIRECT" "$PRIVATE_KEY" "$SHORT_ID"),"
         echo '  "outbounds": ['
-        echo '    {"protocol": "freedom", "tag": "direct"},'
-        echo '    {"protocol": "blackhole", "tag": "block"}'
+        echo '    {"protocol": "freedom", "tag": "direct"}'
         echo '  ],'
         echo '  "routing": {'
-        echo '    "domainStrategy": "IPIfNonMatch",'
         echo '    "rules": ['
         echo '      {'
         echo '        "type": "field",'
         echo '        "inboundTag": ["api"],'
         echo '        "outboundTag": "api"'
-        echo '      },'
-        echo '      {'
-        echo '        "type": "field",'
-        echo '        "user": ["direct-local"],'
-        echo '        "outboundTag": "direct"'
         echo '      },'
         echo '      {'
         echo '        "type": "field",'
@@ -391,7 +384,7 @@ write_management_cli() {
     cat > /usr/local/bin/xray << 'EOF_MANAGEMENT_SCRIPT'
 #!/bin/bash
 
-SCRIPT_VERSION="0.0.11"
+SCRIPT_VERSION="0.0.12"
 SCRIPT_URL="https://github.com/justly110/reality/raw/main/xray.sh"
 
 ENV_FILE="/usr/local/etc/xray/params.env"
@@ -1038,21 +1031,14 @@ rebuild_and_apply() {
         echo '  },'
         echo "  \"inbounds\": $(build_inbounds_json "$PORT" "$DEST_SNI" "$UUID_DIRECT" "$PRIVATE_KEY" "$SHORT_ID"),"
         echo '  "outbounds": ['
-        echo '    {"protocol": "freedom", "tag": "direct"},'
-        echo '    {"protocol": "blackhole", "tag": "block"}'
+        echo '    {"protocol": "freedom", "tag": "direct"}'
         echo '  ],'
         echo '  "routing": {'
-        echo '    "domainStrategy": "IPIfNonMatch",'
         echo '    "rules": ['
         echo '      {'
         echo '        "type": "field",'
         echo '        "inboundTag": ["api"],'
         echo '        "outboundTag": "api"'
-        echo '      },'
-        echo '      {'
-        echo '        "type": "field",'
-        echo '        "user": ["direct-local"],'
-        echo '        "outboundTag": "direct"'
         echo '      },'
         echo '      {'
         echo '        "type": "field",'
