@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# VLESS-Reality 分流中转版 (Debian & Alpine + 纯IPv4单栈 + 本机/落地双用户分流)
+# VLESS-Reality 直连版 (Debian & Alpine + 纯IPv4单栈)
 # 特性：
 # 1. 首页清晰显示管理脚本版本与 Xray 内核版本
 # 2. 支持一键添加与删除扩展 Reality 节点 (声明式重构，0损坏风险)
@@ -8,14 +8,13 @@
 # 4. 重启/停止前强制自动存盘 (杜绝丢漏统计)
 # 5. 默认每月 24 日重置月度流量 (持久化存盘，进程重启不丢失)
 # 6. 主节点与扩展节点流量独立统计，升级保留累计流量
-# 7. 落地机 TCP 毫秒握手延迟与连通性测试
-# 8. TCP BBR 状态检测与环境识别 (支持机器开启，容器小鸡友好提示)
-# 9. 修改 SNI 伪装域名自动握手与证书体积极速体检
-# 10. 低内存 (<=256MB) 自动注入防 OOM 调优参数
-# 11. Xray 内核与管理脚本在线独立检查升级
+# 7. TCP BBR 状态检测与环境识别 (支持机器开启，容器小鸡友好提示)
+# 8. 修改 SNI 伪装域名自动握手与证书体积极速体检
+# 9. 低内存 (<=256MB) 自动注入防 OOM 调优参数
+# 10. Xray 内核与管理脚本在线独立检查升级
 # ==============================================================================
 
-SCRIPT_VERSION="0.0.10"
+SCRIPT_VERSION="0.0.11"
 SCRIPT_URL="https://github.com/justly110/reality/raw/main/xray.sh"
 
 ENV_FILE="/usr/local/etc/xray/params.env"
@@ -60,25 +59,27 @@ bytes_add() {
     awk -v a="${1:-0}" -v b="${2:-0}" 'BEGIN { printf "%.0f", a + b }'
 }
 
-bytes_sum4() {
-    awk -v a="${1:-0}" -v b="${2:-0}" -v c="${3:-0}" -v d="${4:-0}" 'BEGIN { printf "%.0f", a + b + c + d }'
-}
-
 is_config_complete() {
     [ -f "$ENV_FILE" ] || return 1
-    local p_port p_sni p_u1 p_u2 p_pub p_priv p_sid p_ss_addr p_ss_port p_ss_pass p_ss_method
-    eval $(grep -E '^(PORT|DEST_SNI|UUID_DIRECT|UUID_RELAY|PUBLIC_KEY|PRIVATE_KEY|SHORT_ID|SS_ADDR|SS_PORT|SS_PASS|SS_METHOD)=' "$ENV_FILE" 2>/dev/null)
+    local PORT DEST_SNI UUID_DIRECT PUBLIC_KEY PRIVATE_KEY SHORT_ID
+    eval "$(grep -E '^(PORT|DEST_SNI|UUID_DIRECT|PUBLIC_KEY|PRIVATE_KEY|SHORT_ID)=' "$ENV_FILE" 2>/dev/null)"
     [ -n "$PORT" ] && \
     [ -n "$DEST_SNI" ] && \
     [ -n "$UUID_DIRECT" ] && \
-    [ -n "$UUID_RELAY" ] && \
     [ -n "$PUBLIC_KEY" ] && \
     [ -n "$PRIVATE_KEY" ] && \
-    [ -n "$SHORT_ID" ] && \
-    [ -n "$SS_ADDR" ] && \
-    [ -n "$SS_PORT" ] && \
-    [ -n "$SS_PASS" ] && \
-    [ -n "$SS_METHOD" ]
+    [ -n "$SHORT_ID" ]
+}
+
+save_params_env() {
+    {
+        echo "PORT=\"$(env_quote "$PORT")\""
+        echo "DEST_SNI=\"$(env_quote "$DEST_SNI")\""
+        echo "UUID_DIRECT=\"$(env_quote "$UUID_DIRECT")\""
+        echo "PUBLIC_KEY=\"$(env_quote "$PUBLIC_KEY")\""
+        echo "PRIVATE_KEY=\"$(env_quote "$PRIVATE_KEY")\""
+        echo "SHORT_ID=\"$(env_quote "$SHORT_ID")\""
+    } > "$ENV_FILE"
 }
 
 install_dependencies() {
@@ -133,13 +134,11 @@ build_inbounds_json() {
     local port="$1"
     local sni="$2"
     local u_direct="$3"
-    local u_relay="$4"
-    local priv="$5"
-    local sid="$6"
+    local priv="$4"
+    local sid="$5"
 
     sni=$(json_escape "$sni")
     u_direct=$(json_escape "$u_direct")
-    u_relay=$(json_escape "$u_relay")
     priv=$(json_escape "$priv")
     sid=$(json_escape "$sid")
 
@@ -152,8 +151,7 @@ build_inbounds_json() {
     "protocol": "vless",
     "settings": {
       "clients": [
-        {"id": "$u_direct", "flow": "xtls-rprx-vision", "email": "direct-local"},
-        {"id": "$u_relay", "flow": "xtls-rprx-vision", "email": "relay-egress"}
+        {"id": "$u_direct", "flow": "xtls-rprx-vision", "email": "direct-local"}
       ],
       "decryption": "none"
     },
@@ -228,31 +226,10 @@ render_config_json() {
         echo '    "levels": {"0": {"statsUserUplink": true, "statsUserDownlink": true}},'
         echo '    "system": {"statsInboundUplink": true, "statsInboundDownlink": true}'
         echo '  },'
-        echo "  \"inbounds\": $(build_inbounds_json "$PORT" "$DEST_SNI" "$UUID_DIRECT" "$UUID_RELAY" "$PRIVATE_KEY" "$SHORT_ID"),"
+        echo "  \"inbounds\": $(build_inbounds_json "$PORT" "$DEST_SNI" "$UUID_DIRECT" "$PRIVATE_KEY" "$SHORT_ID"),"
         echo '  "outbounds": ['
         echo '    {"protocol": "freedom", "tag": "direct"},'
-        echo '    {"protocol": "blackhole", "tag": "block"},'
-        echo '    {'
-        echo '      "tag": "to-egress-ss",'
-        echo '      "protocol": "shadowsocks",'
-        echo '      "settings": {'
-        echo '        "servers": ['
-        echo '          {'
-        echo "            \"address\": \"$(json_escape "$SS_ADDR")\","
-        echo "            \"port\": $SS_PORT,"
-        echo "            \"method\": \"$(json_escape "$SS_METHOD")\","
-        echo "            \"password\": \"$(json_escape "$SS_PASS")\""
-        echo '          }'
-        echo '        ]'
-        echo '      },'
-        echo '      "streamSettings": {'
-        echo '        "network": "tcp"'
-        echo '      },'
-        echo '      "mux": {'
-        echo '        "enabled": true,'
-        echo '        "concurrency": 8'
-        echo '      }'
-        echo '    }'
+        echo '    {"protocol": "blackhole", "tag": "block"}'
         echo '  ],'
         echo '  "routing": {'
         echo '    "domainStrategy": "IPIfNonMatch",'
@@ -261,11 +238,6 @@ render_config_json() {
         echo '        "type": "field",'
         echo '        "inboundTag": ["api"],'
         echo '        "outboundTag": "api"'
-        echo '      },'
-        echo '      {'
-        echo '        "type": "field",'
-        echo '        "user": ["relay-egress"],'
-        echo '        "outboundTag": "to-egress-ss"'
         echo '      },'
         echo '      {'
         echo '        "type": "field",'
@@ -358,8 +330,6 @@ RESET_DAY=24
 LAST_RESET_MONTH=""
 U1_UP=0
 U1_DOWN=0
-U2_UP=0
-U2_DOWN=0
 EOF
     fi
 
@@ -382,17 +352,14 @@ update_links_info() {
     local host_v4="${s_v4:-你的本机IPv4}"
 
     local l_direct="vless://${UUID_DIRECT}@${host_v4}:${PORT}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=chrome&type=tcp&flow=xtls-rprx-vision&sni=${DEST_SNI}&sid=${SHORT_ID}#9929-DE"
-    local l_relay="vless://${UUID_RELAY}@${host_v4}:${PORT}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=chrome&type=tcp&flow=xtls-rprx-vision&sni=${DEST_SNI}&sid=${SHORT_ID}#9929-US"
 
     {
         echo "=========================================================================="
         echo "🎉 VLESS-Reality 节点配置列表"
         echo "=========================================================================="
-        echo "【主节点 1：本机直连 (direct-local)】"
+        echo "【主节点：本机直连 (direct-local)】"
         echo "● 节点链接: ${l_direct}"
         echo ""
-        echo "【主节点 2：落地转发 (relay-egress -> Shadowsocks)】"
-        echo "● 节点链接: ${l_relay}"
         echo "--------------------------------------------------------------------------"
         echo "主节点详细参数："
         echo "- 本机 IPv4: ${s_v4:-未检测到 (需手动替换)}"
@@ -401,12 +368,6 @@ update_links_info() {
         echo "- 公钥 (pbk): ${PUBLIC_KEY}"
         echo "- ShortId: ${SHORT_ID}"
         echo "- 本机直连 UUID: ${UUID_DIRECT}"
-        echo "- 落地转发 UUID: ${UUID_RELAY}"
-        echo "--------------------------------------------------------------------------"
-        echo "落地机 Shadowsocks 配置："
-        echo "- 落地地址: ${SS_ADDR}:${SS_PORT}"
-        echo "- 加密方式: ${SS_METHOD}"
-        echo "- 落地密码: ${SS_PASS}"
 
         if [ -f "$EXTRA_NODES_FILE" ] && [ -s "$EXTRA_NODES_FILE" ]; then
             echo "=========================================================================="
@@ -430,7 +391,7 @@ write_management_cli() {
     cat > /usr/local/bin/xray << 'EOF_MANAGEMENT_SCRIPT'
 #!/bin/bash
 
-SCRIPT_VERSION="0.0.10"
+SCRIPT_VERSION="0.0.11"
 SCRIPT_URL="https://github.com/justly110/reality/raw/main/xray.sh"
 
 ENV_FILE="/usr/local/etc/xray/params.env"
@@ -464,10 +425,6 @@ bytes_add() {
     awk -v a="${1:-0}" -v b="${2:-0}" 'BEGIN { printf "%.0f", a + b }'
 }
 
-bytes_sum4() {
-    awk -v a="${1:-0}" -v b="${2:-0}" -v c="${3:-0}" -v d="${4:-0}" 'BEGIN { printf "%.0f", a + b + c + d }'
-}
-
 # 扩展节点流量合计，数组为空时直接返回原值
 extra_bytes_total() {
     local total="${1:-0}" i
@@ -490,7 +447,7 @@ load_env() {
 }
 
 load_traffic_env() {
-    RESET_DAY=24; LAST_RESET_MONTH=""; U1_UP=0; U1_DOWN=0; U2_UP=0; U2_DOWN=0
+    RESET_DAY=24; LAST_RESET_MONTH=""; U1_UP=0; U1_DOWN=0
     EX_UP=(); EX_DOWN=()
     [ -f "$TRAFFIC_FILE" ] && source "$TRAFFIC_FILE"
 }
@@ -505,8 +462,6 @@ RESET_DAY=${RESET_DAY:-24}
 LAST_RESET_MONTH="${LAST_RESET_MONTH}"
 U1_UP=${U1_UP:-0}
 U1_DOWN=${U1_DOWN:-0}
-U2_UP=${U2_UP:-0}
-U2_DOWN=${U2_DOWN:-0}
 EOF
     # 扩展节点流量按 extra_nodes.env 的行序存放，删除节点时同步剔除
     local ex_i
@@ -580,7 +535,7 @@ sync_traffic_data() {
         # 旧版本未保存周期标记时仅补齐标记，保留已有累计值。
         LAST_RESET_MONTH="$this_cycle_tag"
     elif [ "$LAST_RESET_MONTH" != "$this_cycle_tag" ]; then
-        U1_UP=0; U1_DOWN=0; U2_UP=0; U2_DOWN=0
+        U1_UP=0; U1_DOWN=0
         local ex_idx
         if [ "${#EX_UP[@]}" -gt 0 ]; then
             for ex_idx in "${!EX_UP[@]}"; do
@@ -595,13 +550,9 @@ sync_traffic_data() {
     if [ -n "$query_out" ]; then
         local delta_u1_up=$(echo "$query_out" | grep -A 2 'user>>>direct-local>>>traffic>>>uplink' | grep '"value":' | awk '{print $2}' | tr -d '",')
         local delta_u1_down=$(echo "$query_out" | grep -A 2 'user>>>direct-local>>>traffic>>>downlink' | grep '"value":' | awk '{print $2}' | tr -d '",')
-        local delta_u2_up=$(echo "$query_out" | grep -A 2 'user>>>relay-egress>>>traffic>>>uplink' | grep '"value":' | awk '{print $2}' | tr -d '",')
-        local delta_u2_down=$(echo "$query_out" | grep -A 2 'user>>>relay-egress>>>traffic>>>downlink' | grep '"value":' | awk '{print $2}' | tr -d '",')
 
         U1_UP=$(bytes_add "$U1_UP" "${delta_u1_up:-0}")
         U1_DOWN=$(bytes_add "$U1_DOWN" "${delta_u1_down:-0}")
-        U2_UP=$(bytes_add "$U2_UP" "${delta_u2_up:-0}")
-        U2_DOWN=$(bytes_add "$U2_DOWN" "${delta_u2_down:-0}")
 
         # 扩展节点按 email user-<端口> 单独累计，避免被 -reset 直接丢弃
         if [ -f "$EXTRA_NODES_FILE" ]; then
@@ -679,8 +630,7 @@ show_traffic_menu() {
         load_traffic_env
         clear
         local total_u1=$(bytes_add "$U1_UP" "$U1_DOWN")
-        local total_u2=$(bytes_add "$U2_UP" "$U2_DOWN")
-        local grand_total=$(bytes_add "$total_u1" "$total_u2")
+        local grand_total="$total_u1"
         local ex_i e_port e_uuid e_sid e_sni e_tag
         ex_i=0
         if [ -f "$EXTRA_NODES_FILE" ]; then
@@ -698,13 +648,10 @@ show_traffic_menu() {
         echo "【当前账单周期】: $(get_cycle_range)"
         echo "【每月重置日期】: 每月 ${RESET_DAY:-24} 日"
         echo "------------------------------------------"
-        echo "【主节点 1：本机直连 (direct-local)】"
+        echo "【主节点：本机直连 (direct-local)】"
         echo "  ↑ 上行: $(format_bytes $U1_UP) | ↓ 下行: $(format_bytes $U1_DOWN)"
         echo "  ∑ 合计: $(format_bytes $total_u1)"
         echo ""
-        echo "【主节点 2：落地转发 (relay-egress)】"
-        echo "  ↑ 上行: $(format_bytes $U2_UP) | ↓ 下行: $(format_bytes $U2_DOWN)"
-        echo "  ∑ 合计: $(format_bytes $total_u2)"
         if [ -f "$EXTRA_NODES_FILE" ] && [ -s "$EXTRA_NODES_FILE" ]; then
             echo "------------------------------------------"
             ex_i=0
@@ -739,7 +686,7 @@ show_traffic_menu() {
             2)
                 read -p "确认清零本周期全部已用流量？[y/N]: " cf_rst </dev/tty
                 if [[ "$cf_rst" =~ ^[yY]$ ]]; then
-                    U1_UP=0; U1_DOWN=0; U2_UP=0; U2_DOWN=0
+                    U1_UP=0; U1_DOWN=0
                     EX_UP=(); EX_DOWN=()
                     LAST_RESET_MONTH=$(cycle_tag_now "${RESET_DAY:-24}")
                     save_traffic_env
@@ -913,41 +860,6 @@ delete_reality_node() {
     read -n 1 -s -r -p "按任意键返回管理菜单..." </dev/tty
 }
 
-# ----------------- 落地机连通性与握手延迟测试 -----------------
-test_landing_server() {
-    load_env
-    clear
-    echo "=========================================="
-    echo "          落地机连通性与握手延迟测试       "
-    echo "=========================================="
-    echo "测试目标 (落地 Shadowsocks): $SS_ADDR:$SS_PORT"
-    echo "------------------------------------------"
-    echo "⏳ 正在发起 TCP 握手测速..."
-
-    local t_start=$(date +%s%3N 2>/dev/null)
-    [ -z "$t_start" ] && t_start=$(date +%s)
-
-    if timeout 4 bash -c "</dev/tcp/$SS_ADDR/$SS_PORT" 2>/dev/null; then
-        local t_end=$(date +%s%3N 2>/dev/null)
-        if [ -n "$t_end" ] && [ "$t_end" -ge "$t_start" ]; then
-            local rtt=$((t_end - t_start))
-            echo -e "✔ TCP 端口状态 : \033[32m成功建立握手\033[0m"
-            echo -e "✔ 节点握手延迟 : \033[1;36m${rtt} ms\033[0m"
-        else
-            echo -e "✔ TCP 端口状态 : \033[32m成功建立握手 (端口开放)\033[0m"
-        fi
-    else
-        echo -e "❌ TCP 握手状态 : \033[31m连接超时 / 失败\033[0m"
-        echo -e "   可能原因: 落地机 IP 填写错误、防火墙未放行端口 $SS_PORT，或落地 SS 未运行。"
-    fi
-
-    echo "------------------------------------------"
-    echo "⏳ 正在测试 ICMP Ping 丢包情况..."
-    ping -c 3 -W 2 "$SS_ADDR" 2>/dev/null | tail -n 2
-    echo "=========================================="
-    read -n 1 -s -r -p "按任意键返回管理菜单..." </dev/tty
-}
-
 # ----------------- TCP BBR 状态检测与管理 -----------------
 manage_bbr() {
     clear
@@ -1039,8 +951,8 @@ verify_sni_health() {
 
 # ----------------- 基础服务与节点重构 -----------------
 build_inbounds_json() {
-    local port="$1"; local sni="$2"; local u_direct="$3"; local u_relay="$4"; local priv="$5"; local sid="$6"
-    sni=$(json_escape "$sni"); u_direct=$(json_escape "$u_direct"); u_relay=$(json_escape "$u_relay")
+    local port="$1"; local sni="$2"; local u_direct="$3"; local priv="$4"; local sid="$5"
+    sni=$(json_escape "$sni"); u_direct=$(json_escape "$u_direct")
     priv=$(json_escape "$priv"); sid=$(json_escape "$sid")
     cat << EOF
 [
@@ -1051,8 +963,7 @@ build_inbounds_json() {
     "protocol": "vless",
     "settings": {
       "clients": [
-        {"id": "$u_direct", "flow": "xtls-rprx-vision", "email": "direct-local"},
-        {"id": "$u_relay", "flow": "xtls-rprx-vision", "email": "relay-egress"}
+        {"id": "$u_direct", "flow": "xtls-rprx-vision", "email": "direct-local"}
       ],
       "decryption": "none"
     },
@@ -1125,31 +1036,10 @@ rebuild_and_apply() {
         echo '    "levels": {"0": {"statsUserUplink": true, "statsUserDownlink": true}},'
         echo '    "system": {"statsInboundUplink": true, "statsInboundDownlink": true}'
         echo '  },'
-        echo "  \"inbounds\": $(build_inbounds_json "$PORT" "$DEST_SNI" "$UUID_DIRECT" "$UUID_RELAY" "$PRIVATE_KEY" "$SHORT_ID"),"
+        echo "  \"inbounds\": $(build_inbounds_json "$PORT" "$DEST_SNI" "$UUID_DIRECT" "$PRIVATE_KEY" "$SHORT_ID"),"
         echo '  "outbounds": ['
         echo '    {"protocol": "freedom", "tag": "direct"},'
-        echo '    {"protocol": "blackhole", "tag": "block"},'
-        echo '    {'
-        echo '      "tag": "to-egress-ss",'
-        echo '      "protocol": "shadowsocks",'
-        echo '      "settings": {'
-        echo '        "servers": ['
-        echo '          {'
-        echo "            \"address\": \"$(json_escape "$SS_ADDR")\","
-        echo "            \"port\": $SS_PORT,"
-        echo "            \"method\": \"$(json_escape "$SS_METHOD")\","
-        echo "            \"password\": \"$(json_escape "$SS_PASS")\""
-        echo '          }'
-        echo '        ]'
-        echo '      },'
-        echo '      "streamSettings": {'
-        echo '        "network": "tcp"'
-        echo '      },'
-        echo '      "mux": {'
-        echo '        "enabled": true,'
-        echo '        "concurrency": 8'
-        echo '      }'
-        echo '    }'
+        echo '    {"protocol": "blackhole", "tag": "block"}'
         echo '  ],'
         echo '  "routing": {'
         echo '    "domainStrategy": "IPIfNonMatch",'
@@ -1158,11 +1048,6 @@ rebuild_and_apply() {
         echo '        "type": "field",'
         echo '        "inboundTag": ["api"],'
         echo '        "outboundTag": "api"'
-        echo '      },'
-        echo '      {'
-        echo '        "type": "field",'
-        echo '        "user": ["relay-egress"],'
-        echo '        "outboundTag": "to-egress-ss"'
         echo '      },'
         echo '      {'
         echo '        "type": "field",'
@@ -1183,14 +1068,9 @@ rebuild_and_apply() {
         echo "PORT=\"$(env_quote "$PORT")\""
         echo "DEST_SNI=\"$(env_quote "$DEST_SNI")\""
         echo "UUID_DIRECT=\"$(env_quote "$UUID_DIRECT")\""
-        echo "UUID_RELAY=\"$(env_quote "$UUID_RELAY")\""
         echo "PUBLIC_KEY=\"$(env_quote "$PUBLIC_KEY")\""
         echo "PRIVATE_KEY=\"$(env_quote "$PRIVATE_KEY")\""
         echo "SHORT_ID=\"$(env_quote "$SHORT_ID")\""
-        echo "SS_ADDR=\"$(env_quote "$SS_ADDR")\""
-        echo "SS_PORT=\"$(env_quote "$SS_PORT")\""
-        echo "SS_PASS=\"$(env_quote "$SS_PASS")\""
-        echo "SS_METHOD=\"$(env_quote "$SS_METHOD")\""
     } > "$ENV_FILE"
 
     do_restart
@@ -1199,17 +1079,14 @@ rebuild_and_apply() {
     local s_v4=$(curl -s4 -m 5 ip.sb 2>/dev/null || curl -s4 -m 5 ifconfig.me 2>/dev/null || curl -s4 -m 5 api.ipify.org 2>/dev/null)
     local host_v4="${s_v4:-你的本机IPv4}"
     local l_direct="vless://${UUID_DIRECT}@${host_v4}:${PORT}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=chrome&type=tcp&flow=xtls-rprx-vision&sni=${DEST_SNI}&sid=${SHORT_ID}#9929-DE"
-    local l_relay="vless://${UUID_RELAY}@${host_v4}:${PORT}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=chrome&type=tcp&flow=xtls-rprx-vision&sni=${DEST_SNI}&sid=${SHORT_ID}#9929-US"
 
     {
         echo "=========================================================================="
         echo "🎉 VLESS-Reality 节点配置列表"
         echo "=========================================================================="
-        echo "【主节点 1：本机直连 (direct-local)】"
+        echo "【主节点：本机直连 (direct-local)】"
         echo "● 节点链接: ${l_direct}"
         echo ""
-        echo "【主节点 2：落地转发 (relay-egress -> Shadowsocks)】"
-        echo "● 节点链接: ${l_relay}"
         echo "--------------------------------------------------------------------------"
         echo "主节点详细参数："
         echo "- 本机 IPv4: ${s_v4:-未检测到 (需手动替换)}"
@@ -1218,12 +1095,6 @@ rebuild_and_apply() {
         echo "- 公钥 (pbk): ${PUBLIC_KEY}"
         echo "- ShortId: ${SHORT_ID}"
         echo "- 本机直连 UUID: ${UUID_DIRECT}"
-        echo "- 落地转发 UUID: ${UUID_RELAY}"
-        echo "--------------------------------------------------------------------------"
-        echo "落地机 Shadowsocks 配置："
-        echo "- 落地地址: ${SS_ADDR}:${SS_PORT}"
-        echo "- 加密方式: ${SS_METHOD}"
-        echo "- 落地密码: ${SS_PASS}"
 
         if [ -f "$EXTRA_NODES_FILE" ] && [ -s "$EXTRA_NODES_FILE" ]; then
             echo "=========================================================================="
@@ -1260,19 +1131,11 @@ modify_config() {
         echo "------------------------------------------"
         echo " [主节点 UUID 管理]"
         echo " 4. 重新生成【本机直连】UUID"
-        echo " 5. 重新生成【落地转发】UUID"
-        echo " 6. 手动输入新的【本机直连】UUID"
-        echo " 7. 手动输入新的【落地转发】UUID"
-        echo "------------------------------------------"
-        echo " [落地机 Shadowsocks 设置]"
-        echo " 8. 修改落地机 IP/域名 (当前: $SS_ADDR)"
-        echo " 9. 修改落地机 端口 (当前: $SS_PORT)"
-        echo " 10. 修改落地机 密码 (当前: $SS_PASS)"
-        echo " 11. 一键修改落地机全部信息 (IP + 端口 + 密码)"
+        echo " 5. 手动输入新的【本机直连】UUID"
         echo "------------------------------------------"
         echo " 0. 返回主菜单"
         echo "=========================================="
-        read -p "请输入选项 [0-11]: " opt </dev/tty
+        read -p "请输入选项 [0-5]: " opt </dev/tty
         case "$opt" in
             1)
                 read -p "请输入新的端口 (1-65535): " new_port </dev/tty
@@ -1299,40 +1162,9 @@ modify_config() {
                 rebuild_and_apply; break
                 ;;
             4) UUID_DIRECT=$($XRAY_BIN uuid); rebuild_and_apply; break ;;
-            5) UUID_RELAY=$($XRAY_BIN uuid); rebuild_and_apply; break ;;
-            6)
+            5)
                 read -p "请输入新的【本机直连】UUID: " custom_uid_dir </dev/tty
                 [ -n "$custom_uid_dir" ] && { UUID_DIRECT="$custom_uid_dir"; rebuild_and_apply; break; }
-                ;;
-            7)
-                read -p "请输入新的【落地转发】UUID: " custom_uid_rel </dev/tty
-                [ -n "$custom_uid_rel" ] && { UUID_RELAY="$custom_uid_rel"; rebuild_and_apply; break; }
-                ;;
-            8)
-                read -p "请输入新的落地机 IP/域名: " new_ss_addr </dev/tty
-                [ -n "$new_ss_addr" ] && { SS_ADDR="$new_ss_addr"; rebuild_and_apply; break; }
-                ;;
-            9)
-                read -p "请输入新的落地机 SS 端口: " new_ss_port </dev/tty
-                if [[ "$new_ss_port" =~ ^[0-9]+$ ]] && [ "$new_ss_port" -ge 1 ] && [ "$new_ss_port" -le 65535 ]; then
-                    SS_PORT="$new_ss_port"; rebuild_and_apply; break
-                fi
-                ;;
-            10)
-                read -p "请输入新的落地机 SS 密码: " new_ss_pass </dev/tty
-                [ -n "$new_ss_pass" ] && { SS_PASS="$new_ss_pass"; rebuild_and_apply; break; }
-                ;;
-            11)
-                read -p "请输入落地机 IP/域名 (留空保持 $SS_ADDR): " b_addr </dev/tty
-                read -p "请输入落地机 端口 (留空保持 $SS_PORT): " b_port </dev/tty
-                read -p "请输入落地机 密码 (留空保持不变): " b_pass </dev/tty
-                if [ -n "$b_port" ] && ! [[ "$b_port" =~ ^[0-9]+$ && "$b_port" -ge 1 && "$b_port" -le 65535 ]]; then
-                    echo -e "\033[31m落地机端口不合法！\033[0m"; sleep 1; continue
-                fi
-                [ -n "$b_addr" ] && SS_ADDR="$b_addr"
-                [ -n "$b_port" ] && SS_PORT="$b_port"
-                [ -n "$b_pass" ] && SS_PASS="$b_pass"
-                rebuild_and_apply; break
                 ;;
             0) break ;;
             *) echo -e "\033[31m无效输入！\033[0m"; sleep 1 ;;
@@ -1508,11 +1340,11 @@ main_menu() {
         sync_traffic_data
         load_traffic_env
         clear
-        local total_cur=$(extra_bytes_total "$(bytes_sum4 "$U1_UP" "$U1_DOWN" "$U2_UP" "$U2_DOWN")")
+        local total_cur=$(extra_bytes_total "$(bytes_add "$U1_UP" "$U1_DOWN")")
         local core_v=$(get_xray_core_version)
 
         echo "=========================================="
-        echo "      Xray-Reality 流量分流管理后台       "
+        echo "      Xray-Reality 直连节点管理后台       "
         echo "=========================================="
         echo -e "程序版本: 脚本 \033[1;36mv${SCRIPT_VERSION}\033[0m | 内核 \033[1;32mv${core_v#v}\033[0m"
         echo -e "服务状态: $(get_status)"
@@ -1525,15 +1357,14 @@ main_menu() {
         echo " 5. 查看月度流量统计与重置设置"
         echo " 6. 一键添加新 Reality 节点 (支持自定义或随机端口)"
         echo " 7. 一键删除扩展 Reality 节点"
-        echo " 8. 修改主节点配置 (端口/SNI/UUID/落地机)"
-        echo " 9. 测试落地机连通性与握手延迟"
-        echo " 10. TCP BBR 加速状态与管理"
-        echo " 11. 检查与升级 (Xray内核 / 管理脚本)"
-        echo " 12. 查看运行日志"
-        echo " 13. 彻底卸载 Xray"
+        echo " 8. 修改主节点配置 (端口/SNI/UUID/密钥)"
+        echo " 9. TCP BBR 加速状态与管理"
+        echo " 10. 检查与升级 (Xray内核 / 管理脚本)"
+        echo " 11. 查看运行日志"
+        echo " 12. 彻底卸载 Xray"
         echo " 0. 退出菜单"
         echo "=========================================="
-        read -p "请输入选项 [0-13]: " choice </dev/tty
+        read -p "请输入选项 [0-12]: " choice </dev/tty
         case "$choice" in
             1) restart_xray ;;
             2) start_xray ;;
@@ -1543,11 +1374,10 @@ main_menu() {
             6) add_reality_node ;;
             7) delete_reality_node ;;
             8) modify_config ;;
-            9) test_landing_server ;;
-            10) manage_bbr ;;
-            11) update_menu ;;
-            12) show_logs ;;
-            13) uninstall_xray ;;
+            9) manage_bbr ;;
+            10) update_menu ;;
+            11) show_logs ;;
+            12) uninstall_xray ;;
             0) clear; exit 0 ;;
             *) echo -e "\033[31m无效输入！\033[0m"; sleep 1 ;;
         esac
@@ -1572,23 +1402,21 @@ if is_config_complete; then
     echo "  - 端口: $PORT"
     echo "  - 伪装 SNI: $DEST_SNI"
     echo "  - 本机直连 UUID: $UUID_DIRECT"
-    echo "  - 落地转发 UUID: $UUID_RELAY"
-    echo "  - 落地 SS 目标: $SS_ADDR:$SS_PORT"
     echo "----------------------------------------------------------"
 
     if [ "$1" = "--auto-upgrade" ]; then
         mode_choice=1
     else
         echo "请选择运行模式："
-        echo "  1. 保留现有全部配置平滑升级 (保留节点及累计流量)"
-        echo "  2. 重新配置 (覆盖已有参数，重新输入落地机及生成新 UUID)"
+        echo "  1. 保留直连及扩展节点配置升级 (保留对应累计流量)"
+        echo "  2. 重新配置 (覆盖已有参数，生成新的直连 UUID 及密钥)"
         echo "----------------------------------------------------------"
         read -p "请输入选项 [1-2] (默认 1): " mode_choice </dev/tty
         mode_choice=${mode_choice:-1}
     fi
 
     if [ "$mode_choice" = "1" ]; then
-        echo -e "\n⏳ 正在执行无缝平滑升级（原节点链接完全保持不变）..."
+        echo -e "\n⏳ 正在执行直连配置升级（直连及扩展节点链接保持不变）..."
         # 先部署修复后的统计逻辑，兼容旧统计文件中缺失的周期标记。
         write_management_cli
         if ! /usr/local/bin/xray -s; then
@@ -1596,15 +1424,16 @@ if is_config_complete; then
             exit 1
         fi
         init_traffic_db
-        # 在线更新管理脚本无需替换内核或重启服务，内存计数持续保留。
+        # 在线更新无需替换内核，但必须重建配置以应用直连节点设置。
         if [ "$1" != "--auto-upgrade" ]; then
             install_xray_core
             /usr/local/bin/xray -s || exit 1
-            render_config_json
-            write_service
         fi
+        save_params_env
+        render_config_json
+        write_service
         update_links_info
-        echo -e "\033[32m🎉 平滑升级完成！原有节点链接无需重新导入。\033[0m"
+        echo -e "\033[32m🎉 升级完成！直连及扩展节点链接无需重新导入。\033[0m"
         echo -e "在终端直接输入 \033[1;33mxray\033[0m 即可体验新增功能。\n"
         exit 0
     fi
@@ -1616,20 +1445,7 @@ echo "开始全新部署流程..."
 echo "====================================="
 install_xray_core
 
-echo -e "\n====================================="
-echo "配置落地机 Shadowsocks 转发参数..."
-echo "====================================="
-read -p "请输入落地机 IP / 域名 (留空则预留占位符): " INPUT_SS_ADDR </dev/tty
-read -p "请输入落地机 SS 端口 (默认 30333): " INPUT_SS_PORT </dev/tty
-read -p "请输入落地机 SS 密码 (留空则预留占位符): " INPUT_SS_PASS </dev/tty
-
-SS_ADDR="${INPUT_SS_ADDR:-127.0.0.1}"
-SS_PORT="${INPUT_SS_PORT:-30333}"
-SS_PASS="${INPUT_SS_PASS:-YOUR_SS_PASSWORD_HERE}"
-SS_METHOD="2022-blake3-aes-128-gcm"
-
 UUID_DIRECT=$($XRAY_BIN uuid)
-UUID_RELAY=$($XRAY_BIN uuid)
 KEYS=$($XRAY_BIN x25519)
 PRIVATE_KEY=$(echo "$KEYS" | awk '/^PrivateKey:/ {print $2}')
 PUBLIC_KEY=$(echo "$KEYS" | awk '/PublicKey|Password/ {print $NF}')
@@ -1643,19 +1459,7 @@ SHORT_ID=$(openssl rand -hex 8)
 DEST_SNI="addons.mozilla.org"
 PORT=443
 
-{
-    echo "PORT=\"$(env_quote "$PORT")\""
-    echo "DEST_SNI=\"$(env_quote "$DEST_SNI")\""
-    echo "UUID_DIRECT=\"$(env_quote "$UUID_DIRECT")\""
-    echo "UUID_RELAY=\"$(env_quote "$UUID_RELAY")\""
-    echo "PUBLIC_KEY=\"$(env_quote "$PUBLIC_KEY")\""
-    echo "PRIVATE_KEY=\"$(env_quote "$PRIVATE_KEY")\""
-    echo "SHORT_ID=\"$(env_quote "$SHORT_ID")\""
-    echo "SS_ADDR=\"$(env_quote "$SS_ADDR")\""
-    echo "SS_PORT=\"$(env_quote "$SS_PORT")\""
-    echo "SS_PASS=\"$(env_quote "$SS_PASS")\""
-    echo "SS_METHOD=\"$(env_quote "$SS_METHOD")\""
-} > "$ENV_FILE"
+save_params_env
 
 render_config_json
 write_service
