@@ -3,23 +3,20 @@
 # VLESS-Reality 直连版 (Debian & Alpine + 纯IPv4单栈)
 # 特性：
 # 1. 首页清晰显示管理脚本版本与 Xray 内核版本
-# 2. 每 2 分钟极速存盘 + 支持终端直接执行 `xray -s` 瞬时存盘
-# 3. 重启/停止前强制自动存盘 (杜绝丢漏统计)
-# 4. 默认每月 24 日重置月度流量 (持久化存盘，进程重启不丢失)
-# 5. 主节点与扩展节点流量独立统计，升级保留累计流量
-# 6. TCP BBR 状态检测与环境识别 (支持机器开启，容器小鸡友好提示)
-# 7. 修改 SNI 伪装域名自动握手与证书体积极速体检
-# 8. 低内存 (<=256MB) 自动注入防 OOM 调优参数
-# 9. Xray 内核与管理脚本在线独立检查升级
+# 2. 深度网络内核调优 (32MB TCP 动态缓冲区 + BBR + FQ，适配高延迟长肥管道)
+# 3. Xray 传输层性能调优 (启用 TCP Fast Open + 15s KeepAlive，禁用服务端嗅探)
+# 4. TCP BBR 状态检测、环境识别与一键网络加速调优
+# 5. 修改 SNI 伪装域名自动握手与证书体积极速体检
+# 6. 低内存 (<=256MB) 自动注入防 OOM 调优参数
+# 7. Xray 内核与管理脚本在线独立检查升级
 # ==============================================================================
 
-SCRIPT_VERSION="0.0.13"
+SCRIPT_VERSION="0.0.14"
 SCRIPT_URL="https://github.com/justly110/reality/raw/main/xray.sh"
 
 ENV_FILE="/usr/local/etc/xray/params.env"
 CONFIG_FILE="/usr/local/etc/xray/config.json"
 LINK_FILE="/usr/local/etc/xray/link.txt"
-TRAFFIC_FILE="/usr/local/etc/xray/traffic.env"
 EXTRA_NODES_FILE="/usr/local/etc/xray/extra_nodes.env"
 XRAY_BIN="/usr/local/bin/xray-core"
 
@@ -29,7 +26,7 @@ if [ "$(id -u)" != "0" ]; then
 fi
 
 # ------------------------------------------------------------------------------
-# 1. 检查现有配置完整度
+# 1. 检查现有配置完整度与辅助工具
 # ------------------------------------------------------------------------------
 # JSON 字符串转义，防止密码/域名中的引号与反斜杠破坏 config.json
 json_escape() {
@@ -53,9 +50,49 @@ env_quote() {
     printf '%s' "$s"
 }
 
-# 数字相加，避免 bash $(( )) 在大流量下溢出
-bytes_add() {
-    awk -v a="${1:-0}" -v b="${2:-0}" 'BEGIN { printf "%.0f", a + b }'
+# 深度网络内核调优 (长肥管道与高延迟优化)
+optimize_network() {
+    echo "====================================="
+    echo "🚀 正在调优系统 TCP 缓冲区与网络参数..."
+    echo "====================================="
+    modprobe tcp_bbr 2>/dev/null || true
+
+    local params=(
+        "net.ipv4.tcp_window_scaling"
+        "net.core.rmem_max"
+        "net.core.wmem_max"
+        "net.core.rmem_default"
+        "net.core.wmem_default"
+        "net.core.netdev_max_backlog"
+        "net.ipv4.tcp_rmem"
+        "net.ipv4.tcp_wmem"
+        "net.ipv4.tcp_slow_start_after_idle"
+        "net.ipv4.tcp_mtu_probing"
+        "net.ipv4.tcp_notsent_lowat"
+        "net.core.default_qdisc"
+        "net.ipv4.tcp_congestion_control"
+    )
+    for p in "${params[@]}"; do
+        sed -i "/^${p}[[:space:]]*=/d" /etc/sysctl.conf 2>/dev/null
+    done
+
+    cat >> /etc/sysctl.conf << 'EOF'
+net.ipv4.tcp_window_scaling = 1
+net.core.rmem_max = 33554432
+net.core.wmem_max = 33554432
+net.core.rmem_default = 1048576
+net.core.wmem_default = 1048576
+net.core.netdev_max_backlog = 10000
+net.ipv4.tcp_rmem = 4096 1048576 33554432
+net.ipv4.tcp_wmem = 4096 1048576 33554432
+net.ipv4.tcp_slow_start_after_idle = 0
+net.ipv4.tcp_mtu_probing = 1
+net.ipv4.tcp_notsent_lowat = 16384
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr
+EOF
+    sysctl -p >/dev/null 2>&1 || true
+    echo "✔ 网络参数优化完成！"
 }
 
 is_config_complete() {
@@ -162,17 +199,13 @@ build_inbounds_json() {
         "serverNames": ["$sni"],
         "privateKey": "$priv",
         "shortIds": ["$sid"]
+      },
+      "sockopt": {
+        "tcpFastOpen": true,
+        "tcpKeepAliveInterval": 15
       }
     },
-    "sniffing": {"enabled": true, "destOverride": ["http", "tls"]}
-  },
-  {
-    "tag": "api",
-    "listen": "127.0.0.1",
-    "port": 10085,
-    "protocol": "dokodemo-door",
-    "settings": {"address": "127.0.0.1"},
-    "streamSettings": {"network": "tcp"}
+    "sniffing": {"enabled": false}
   }
 EOF
 
@@ -204,9 +237,13 @@ EOF
         "serverNames": ["$e_sni"],
         "privateKey": "$priv",
         "shortIds": ["$e_sid"]
+      },
+      "sockopt": {
+        "tcpFastOpen": true,
+        "tcpKeepAliveInterval": 15
       }
     },
-    "sniffing": {"enabled": true, "destOverride": ["http", "tls"]}
+    "sniffing": {"enabled": false}
   }
 EOF
         done < "$EXTRA_NODES_FILE"
@@ -219,23 +256,12 @@ render_config_json() {
     {
         echo "{"
         echo '  "log": {"loglevel": "warning"},'
-        echo '  "stats": {},'
-        echo '  "api": {"tag": "api", "services": ["StatsService"]},'
-        echo '  "policy": {'
-        echo '    "levels": {"0": {"statsUserUplink": true, "statsUserDownlink": true}},'
-        echo '    "system": {"statsInboundUplink": true, "statsInboundDownlink": true}'
-        echo '  },'
         echo "  \"inbounds\": $(build_inbounds_json "$PORT" "$DEST_SNI" "$UUID_DIRECT" "$PRIVATE_KEY" "$SHORT_ID"),"
         echo '  "outbounds": ['
         echo '    {"protocol": "freedom", "tag": "direct"}'
         echo '  ],'
         echo '  "routing": {'
         echo '    "rules": ['
-        echo '      {'
-        echo '        "type": "field",'
-        echo '        "inboundTag": ["api"],'
-        echo '        "outboundTag": "api"'
-        echo '      },'
         echo '      {'
         echo '        "type": "field",'
         echo '        "network": "tcp,udp",'
@@ -315,27 +341,10 @@ EOF_SYSTEMD
     fi
 }
 
-init_traffic_db() {
-    if [ ! -f "$TRAFFIC_FILE" ]; then
-        cat > "$TRAFFIC_FILE" << 'EOF'
-RESET_DAY=24
-LAST_RESET_MONTH=""
-U1_UP=0
-U1_DOWN=0
-EOF
-    fi
-
-    # 配置 Cron 定时任务：每 2 分钟使用 xray -s 自动同步存盘
-    if [ -d "/etc/cron.d" ]; then
-        echo "*/2 * * * * root /usr/local/bin/xray -s >/dev/null 2>&1" > /etc/cron.d/xray-traffic
-        chmod 644 /etc/cron.d/xray-traffic
-    elif command -v crontab >/dev/null 2>&1; then
-        (crontab -l 2>/dev/null | grep -v "xray -s" | grep -v "xray --sync-traffic"; echo "*/2 * * * * /usr/local/bin/xray -s >/dev/null 2>&1") | crontab -
-    fi
-
-    if command -v rc-update >/dev/null 2>&1; then
-        rc-update add crond default >/dev/null 2>&1 || true
-        rc-service crond start >/dev/null 2>&1 || true
+clean_traffic_cron() {
+    rm -f /etc/cron.d/xray-traffic 2>/dev/null || true
+    if command -v crontab >/dev/null 2>&1; then
+        crontab -l 2>/dev/null | grep -v "xray -s" | grep -v "xray --sync-traffic" | crontab - 2>/dev/null || true
     fi
 }
 
@@ -383,13 +392,12 @@ write_management_cli() {
     cat > /usr/local/bin/xray << 'EOF_MANAGEMENT_SCRIPT'
 #!/bin/bash
 
-SCRIPT_VERSION="0.0.13"
+SCRIPT_VERSION="0.0.14"
 SCRIPT_URL="https://github.com/justly110/reality/raw/main/xray.sh"
 
 ENV_FILE="/usr/local/etc/xray/params.env"
 CONFIG_FILE="/usr/local/etc/xray/config.json"
 LINK_FILE="/usr/local/etc/xray/link.txt"
-TRAFFIC_FILE="/usr/local/etc/xray/traffic.env"
 EXTRA_NODES_FILE="/usr/local/etc/xray/extra_nodes.env"
 XRAY_BIN="/usr/local/bin/xray-core"
 
@@ -413,60 +421,8 @@ env_quote() {
     printf '%s' "$s"
 }
 
-bytes_add() {
-    awk -v a="${1:-0}" -v b="${2:-0}" 'BEGIN { printf "%.0f", a + b }'
-}
-
-# 扩展节点流量合计，数组为空时直接返回原值
-extra_bytes_total() {
-    local total="${1:-0}" i
-    [ "${#EX_UP[@]}" -eq 0 ] && { echo "$total"; return; }
-    for i in "${!EX_UP[@]}"; do
-        total=$(bytes_add "$total" "${EX_UP[$i]:-0}")
-        total=$(bytes_add "$total" "${EX_DOWN[$i]:-0}")
-    done
-    echo "$total"
-}
-
-day_of_month() {
-    local d
-    d=$(date +%d)
-    echo "$((10#$d))"
-}
-
 load_env() {
     if [ -f "$ENV_FILE" ]; then source "$ENV_FILE"; else echo "❌ 缺少 $ENV_FILE"; exit 1; fi
-}
-
-load_traffic_env() {
-    RESET_DAY=24; LAST_RESET_MONTH=""; U1_UP=0; U1_DOWN=0
-    EX_UP=(); EX_DOWN=()
-    [ -f "$TRAFFIC_FILE" ] && source "$TRAFFIC_FILE"
-}
-
-save_traffic_env() {
-    # 在同一目录写临时文件后原子替换，避免读到写入一半的统计文件。
-    local traffic_tmp
-    traffic_tmp=$(mktemp "${TRAFFIC_FILE}.tmp.XXXXXX") || return 1
-    {
-    cat << EOF
-RESET_DAY=${RESET_DAY:-24}
-LAST_RESET_MONTH="${LAST_RESET_MONTH}"
-U1_UP=${U1_UP:-0}
-U1_DOWN=${U1_DOWN:-0}
-EOF
-    # 扩展节点流量按 extra_nodes.env 的行序存放，删除节点时同步剔除
-    local ex_i
-    if [ "${#EX_UP[@]}" -gt 0 ]; then
-        for ex_i in "${!EX_UP[@]}"; do
-            echo "EX_UP[$ex_i]=${EX_UP[$ex_i]:-0}"
-            echo "EX_DOWN[$ex_i]=${EX_DOWN[$ex_i]:-0}"
-        done
-    fi
-    } > "$traffic_tmp" && mv -f "$traffic_tmp" "$TRAFFIC_FILE" || {
-        rm -f "$traffic_tmp"
-        return 1
-    }
 }
 
 get_status() {
@@ -490,232 +446,76 @@ get_xray_core_version() {
     [ -n "$v" ] && echo "$v" || echo "未知"
 }
 
-format_bytes() {
-    local b="${1:-0}"
-    awk -v b="$b" 'BEGIN {
-        if (b < 1024) printf "%.2f B", b
-        else if (b < 1048576) printf "%.2f KB", b / 1024
-        else if (b < 1073741824) printf "%.2f MB", b / 1048576
-        else printf "%.2f GB", b / 1073741824
-    }'
-}
-
-# ----------------- 流量统计与同步核心 -----------------
-# 取本账单周期的起始标记：重置日及之后属于当月周期，之前属于上月周期
-cycle_tag_now() {
-    local r_day="${1:-24}"
-    local cur_y=$(date +%Y)
-    local cur_m=$(date +%m)
-    local cur_d=$(day_of_month)
-    if [ "$cur_d" -ge "$r_day" ]; then
-        echo "${cur_y}-${cur_m}"
-    else
-        local prev_m=$((10#$cur_m - 1))
-        local prev_y=$cur_y
-        if [ "$prev_m" -lt 1 ]; then prev_m=12; prev_y=$((cur_y - 1)); fi
-        printf "%d-%02d" "$prev_y" "$prev_m"
-    fi
-}
-
-sync_traffic_data() {
-    load_traffic_env
-    local r_day=${RESET_DAY:-24}
-
-    # 1. 按账单周期补重置：即使重置日当天没开机，之后启动也会补上
-    local this_cycle_tag=$(cycle_tag_now "$r_day")
-    if [ -z "$LAST_RESET_MONTH" ]; then
-        # 旧版本未保存周期标记时仅补齐标记，保留已有累计值。
-        LAST_RESET_MONTH="$this_cycle_tag"
-    elif [ "$LAST_RESET_MONTH" != "$this_cycle_tag" ]; then
-        U1_UP=0; U1_DOWN=0
-        local ex_idx
-        if [ "${#EX_UP[@]}" -gt 0 ]; then
-            for ex_idx in "${!EX_UP[@]}"; do
-                EX_UP[$ex_idx]=0; EX_DOWN[$ex_idx]=0
-            done
-        fi
-        LAST_RESET_MONTH="$this_cycle_tag"
-    fi
-
-    # 2. 调用 API 读取增量 (带 -reset=true 原子清空内存计数)
-    local query_out=$($XRAY_BIN api statsquery --server=127.0.0.1:10085 -reset=true 2>/dev/null)
-    if [ -n "$query_out" ]; then
-        local delta_u1_up=$(echo "$query_out" | grep -A 2 'user>>>direct-local>>>traffic>>>uplink' | grep '"value":' | awk '{print $2}' | tr -d '",')
-        local delta_u1_down=$(echo "$query_out" | grep -A 2 'user>>>direct-local>>>traffic>>>downlink' | grep '"value":' | awk '{print $2}' | tr -d '",')
-
-        U1_UP=$(bytes_add "$U1_UP" "${delta_u1_up:-0}")
-        U1_DOWN=$(bytes_add "$U1_DOWN" "${delta_u1_down:-0}")
-
-        # 扩展节点按 email user-<端口> 单独累计，避免被 -reset 直接丢弃
-        if [ -f "$EXTRA_NODES_FILE" ]; then
-            local ex_i=0 e_port e_rest delta_ex_up delta_ex_down
-            while IFS='|' read -r e_port e_rest; do
-                [ -z "$e_port" ] && continue
-                delta_ex_up=$(echo "$query_out" | grep -A 2 "user>>>user-${e_port}>>>traffic>>>uplink" | grep '"value":' | awk '{print $2}' | tr -d '",')
-                delta_ex_down=$(echo "$query_out" | grep -A 2 "user>>>user-${e_port}>>>traffic>>>downlink" | grep '"value":' | awk '{print $2}' | tr -d '",')
-                EX_UP[$ex_i]=$(bytes_add "${EX_UP[$ex_i]:-0}" "${delta_ex_up:-0}")
-                EX_DOWN[$ex_i]=$(bytes_add "${EX_DOWN[$ex_i]:-0}" "${delta_ex_down:-0}")
-                ex_i=$((ex_i + 1))
-            done < "$EXTRA_NODES_FILE"
-        fi
-    fi
-
-    save_traffic_env
-}
-
-# 基础控制封装：重启和停止前先强制同步存盘（杜绝丢流量）
+# 基础控制封装
 do_restart() {
-    sync_traffic_data
     if command -v systemctl >/dev/null 2>&1; then systemctl restart xray; elif command -v rc-service >/dev/null 2>&1; then rc-service xray restart; fi
 }
-do_start_raw() {
+do_start() {
     if command -v systemctl >/dev/null 2>&1; then systemctl start xray; elif command -v rc-service >/dev/null 2>&1; then rc-service xray start; fi
 }
-do_stop_raw() {
+do_stop() {
     if command -v systemctl >/dev/null 2>&1; then systemctl stop xray; elif command -v rc-service >/dev/null 2>&1; then rc-service xray stop; fi
 }
-do_stop() {
-    sync_traffic_data
-    do_stop_raw
-}
 
-# 支持 -s 或 --sync-traffic 参数直接调用
-if [ "$1" = "-s" ] || [ "$1" = "--sync-traffic" ]; then
-    sync_traffic_data
-    exit $?
-fi
-
-# 计算账单周期字符串
-get_cycle_range() {
-    local r_day="${RESET_DAY:-24}"
-    local cur_y=$(date +%Y)
-    local cur_m=$(date +%m)
-    local cur_d=$(day_of_month)
-    local start_date=""
-    local end_date=""
-    local r_str=""
-    printf -v r_str "%02d" "$r_day"
-
-    if [ "$cur_d" -ge "$r_day" ]; then
-        start_date="${cur_y}-${cur_m}-${r_str}"
-        local next_m=$((10#$cur_m + 1))
-        local next_y=$cur_y
-        if [ "$next_m" -gt 12 ]; then next_m=1; next_y=$((cur_y + 1)); fi
-        local next_m_str=""
-        printf -v next_m_str "%02d" "$next_m"
-        end_date="${next_y}-${next_m_str}-${r_str} (前一日)"
-    else
-        local prev_m=$((10#$cur_m - 1))
-        local prev_y=$cur_y
-        if [ "$prev_m" -lt 1 ]; then prev_m=12; prev_y=$((cur_y - 1)); fi
-        local prev_m_str=""
-        printf -v prev_m_str "%02d" "$prev_m"
-        start_date="${prev_y}-${prev_m_str}-${r_str}"
-        end_date="${cur_y}-${cur_m}-${r_str} (前一日)"
-    fi
-    echo "${start_date} ~ ${end_date}"
-}
-
-show_traffic_menu() {
-    while true; do
-        sync_traffic_data
-        load_traffic_env
-        clear
-        local total_u1=$(bytes_add "$U1_UP" "$U1_DOWN")
-        local grand_total="$total_u1"
-        local ex_i e_port e_uuid e_sid e_sni e_tag
-        ex_i=0
-        if [ -f "$EXTRA_NODES_FILE" ]; then
-            while IFS='|' read -r e_port e_uuid e_sid e_sni e_tag; do
-                [ -z "$e_port" ] && continue
-                grand_total=$(bytes_add "$grand_total" "${EX_UP[$ex_i]:-0}")
-                grand_total=$(bytes_add "$grand_total" "${EX_DOWN[$ex_i]:-0}")
-                ex_i=$((ex_i + 1))
-            done < "$EXTRA_NODES_FILE"
-        fi
-
-        echo "=========================================="
-        echo "          月度流量统计与重置设置          "
-        echo "=========================================="
-        echo "【当前账单周期】: $(get_cycle_range)"
-        echo "【每月重置日期】: 每月 ${RESET_DAY:-24} 日"
-        echo "------------------------------------------"
-        echo "【主节点：本机直连 (direct-local)】"
-        echo "  ↑ 上行: $(format_bytes $U1_UP) | ↓ 下行: $(format_bytes $U1_DOWN)"
-        echo "  ∑ 合计: $(format_bytes $total_u1)"
-        echo ""
-        if [ -f "$EXTRA_NODES_FILE" ] && [ -s "$EXTRA_NODES_FILE" ]; then
-            echo "------------------------------------------"
-            ex_i=0
-            while IFS='|' read -r e_port e_uuid e_sid e_sni e_tag; do
-                [ -z "$e_port" ] && continue
-                echo "【扩展节点：${e_tag} (端口 ${e_port})】"
-                echo "  ↑ 上行: $(format_bytes ${EX_UP[$ex_i]:-0}) | ↓ 下行: $(format_bytes ${EX_DOWN[$ex_i]:-0})"
-                echo "  ∑ 合计: $(format_bytes $(bytes_add "${EX_UP[$ex_i]:-0}" "${EX_DOWN[$ex_i]:-0}"))"
-                ex_i=$((ex_i + 1))
-            done < "$EXTRA_NODES_FILE"
-        fi
-        echo "------------------------------------------"
-        echo -e "【全部节点总计消耗】: \033[1;32m$(format_bytes $grand_total)\033[0m (上行+下行合计)"
-        echo "=========================================="
-        echo " 1. 修改每月重置日期 (当前: 每月 ${RESET_DAY:-24} 号)"
-        echo " 2. 手动清零当前周期流量"
-        echo " 0. 返回主管理菜单"
-        echo "=========================================="
-        read -p "请输入选项 [0-2]: " t_opt </dev/tty
-        case "$t_opt" in
-            1)
-                read -p "请输入新的重置日 [1-31] (默认 24): " new_rday </dev/tty
-                if [[ "$new_rday" =~ ^[0-9]+$ ]] && [ "$new_rday" -ge 1 ] && [ "$new_rday" -le 31 ]; then
-                    RESET_DAY="$new_rday"
-                    LAST_RESET_MONTH=$(cycle_tag_now "$RESET_DAY")
-                    save_traffic_env
-                    echo -e "\033[32m✔ 重置日已修改为每月 ${RESET_DAY} 日！\033[0m"; sleep 1
-                else
-                    echo -e "\033[31m输入不合法！\033[0m"; sleep 1
-                fi
-                ;;
-            2)
-                read -p "确认清零本周期全部已用流量？[y/N]: " cf_rst </dev/tty
-                if [[ "$cf_rst" =~ ^[yY]$ ]]; then
-                    U1_UP=0; U1_DOWN=0
-                    EX_UP=(); EX_DOWN=()
-                    LAST_RESET_MONTH=$(cycle_tag_now "${RESET_DAY:-24}")
-                    save_traffic_env
-                    echo -e "\033[32m✔ 流量已归零！\033[0m"; sleep 1
-                fi
-                ;;
-            0) break ;;
-            *) echo -e "\033[31m无效输入！\033[0m"; sleep 1 ;;
-        esac
+# 应用 32MB TCP 动态缓冲区与长肥管道网络参数
+apply_sysctl_optimization() {
+    modprobe tcp_bbr 2>/dev/null || true
+    local params=(
+        "net.ipv4.tcp_window_scaling"
+        "net.core.rmem_max"
+        "net.core.wmem_max"
+        "net.core.rmem_default"
+        "net.core.wmem_default"
+        "net.core.netdev_max_backlog"
+        "net.ipv4.tcp_rmem"
+        "net.ipv4.tcp_wmem"
+        "net.ipv4.tcp_slow_start_after_idle"
+        "net.ipv4.tcp_mtu_probing"
+        "net.ipv4.tcp_notsent_lowat"
+        "net.core.default_qdisc"
+        "net.ipv4.tcp_congestion_control"
+    )
+    for p in "${params[@]}"; do
+        sed -i "/^${p}[[:space:]]*=/d" /etc/sysctl.conf 2>/dev/null
     done
+    cat >> /etc/sysctl.conf << 'EOF_SYSCTL'
+net.ipv4.tcp_window_scaling = 1
+net.core.rmem_max = 33554432
+net.core.wmem_max = 33554432
+net.core.rmem_default = 1048576
+net.core.wmem_default = 1048576
+net.core.netdev_max_backlog = 10000
+net.ipv4.tcp_rmem = 4096 1048576 33554432
+net.ipv4.tcp_wmem = 4096 1048576 33554432
+net.ipv4.tcp_slow_start_after_idle = 0
+net.ipv4.tcp_mtu_probing = 1
+net.ipv4.tcp_notsent_lowat = 16384
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr
+EOF_SYSCTL
+    sysctl -p >/dev/null 2>&1 || true
 }
 
-# ----------------- TCP BBR 状态检测与管理 -----------------
+# ----------------- TCP BBR 状态检测与网络调优 -----------------
 manage_bbr() {
     clear
     echo "=========================================="
-    echo "         TCP BBR 加速状态与环境检测       "
+    echo "       TCP BBR 加速与网络内核调优         "
     echo "=========================================="
     local cur_cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || cat /proc/sys/net/ipv4/tcp_congestion_control 2>/dev/null)
     local cur_qdisc=$(sysctl -n net.core.default_qdisc 2>/dev/null || cat /proc/sys/net/core/default_qdisc 2>/dev/null)
+    local cur_rmem=$(sysctl -n net.core.rmem_max 2>/dev/null || true)
     local virt=$(systemd-detect-virt 2>/dev/null || true)
 
     echo "当前拥塞控制算法 : ${cur_cc:-未知}"
     echo "当前网络队列算法 : ${cur_qdisc:-未知}"
+    [ -n "$cur_rmem" ] && echo "核心读缓冲区上限 : $((cur_rmem / 1024 / 1024)) MB"
     [ -n "$virt" ] && echo "底层虚拟化架构   : $virt"
     echo "------------------------------------------"
 
     local is_container=0
     if [ "$virt" = "lxc" ] || [ "$virt" = "openvz" ] || [ ! -w "/proc/sys/net/ipv4/tcp_congestion_control" ]; then
         is_container=1
-    fi
-
-    if [ "$cur_cc" = "bbr" ]; then
-        echo -e "\033[32m✔ 恭喜！当前系统已成功启用 BBR 拥塞控制算法。\033[0m"
-        echo ""
-        read -n 1 -s -r -p "按任意键返回管理菜单..." </dev/tty
-        return
     fi
 
     if [ "$is_container" -eq 1 ]; then
@@ -726,19 +526,26 @@ manage_bbr() {
         return
     fi
 
+    if [ "$cur_cc" = "bbr" ]; then
+        echo -e "\033[32m✔ 系统已成功启用 BBR 拥塞控制算法。\033[0m"
+        read -p "是否重新应用/刷新 32MB TCP 动态缓冲区参数？[y/N]: " re_opt </dev/tty
+        if [[ "$re_opt" =~ ^[yY]$ ]]; then
+            apply_sysctl_optimization
+            echo -e "\033[32m🎉 网络优化参数刷新成功！\033[0m"
+        fi
+        echo ""
+        read -n 1 -s -r -p "按任意键返回管理菜单..." </dev/tty
+        return
+    fi
+
     echo "当前未开启 BBR，系统支持开启。"
-    read -p "是否现在一键开启 BBR + FQ 加速？[Y/n]: " do_bbr </dev/tty
+    read -p "是否现在一键开启 BBR + FQ 加速并优化 TCP 缓冲区 (32MB)？[Y/n]: " do_bbr </dev/tty
     if [[ ! "$do_bbr" =~ ^[nN]$ ]]; then
-        modprobe tcp_bbr 2>/dev/null || true
-        sed -i '/net.core.default_qdisc/d' /etc/sysctl.conf
-        sed -i '/net.ipv4.tcp_congestion_control/d' /etc/sysctl.conf
-        echo "net.core.default_qdisc = fq" >> /etc/sysctl.conf
-        echo "net.ipv4.tcp_congestion_control = bbr" >> /etc/sysctl.conf
-        sysctl -p >/dev/null 2>&1
+        apply_sysctl_optimization
         sleep 1
         local check_cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)
         if [ "$check_cc" = "bbr" ]; then
-            echo -e "\033[32m🎉 BBR 开启成功！\033[0m"
+            echo -e "\033[32m🎉 BBR 及高带宽 TCP 缓冲区配置成功！\033[0m"
         else
             echo -e "\033[31m❌ 开启失败，可能需要更新系统内核。\033[0m"
         fi
@@ -806,17 +613,13 @@ build_inbounds_json() {
         "serverNames": ["$sni"],
         "privateKey": "$priv",
         "shortIds": ["$sid"]
+      },
+      "sockopt": {
+        "tcpFastOpen": true,
+        "tcpKeepAliveInterval": 15
       }
     },
-    "sniffing": {"enabled": true, "destOverride": ["http", "tls"]}
-  },
-  {
-    "tag": "api",
-    "listen": "127.0.0.1",
-    "port": 10085,
-    "protocol": "dokodemo-door",
-    "settings": {"address": "127.0.0.1"},
-    "streamSettings": {"network": "tcp"}
+    "sniffing": {"enabled": false}
   }
 EOF
 
@@ -845,9 +648,13 @@ EOF
         "serverNames": ["$e_sni"],
         "privateKey": "$priv",
         "shortIds": ["$e_sid"]
+      },
+      "sockopt": {
+        "tcpFastOpen": true,
+        "tcpKeepAliveInterval": 15
       }
     },
-    "sniffing": {"enabled": true, "destOverride": ["http", "tls"]}
+    "sniffing": {"enabled": false}
   }
 EOF
         done < "$EXTRA_NODES_FILE"
@@ -861,23 +668,12 @@ rebuild_and_apply() {
     {
         echo "{"
         echo '  "log": {"loglevel": "warning"},'
-        echo '  "stats": {},'
-        echo '  "api": {"tag": "api", "services": ["StatsService"]},'
-        echo '  "policy": {'
-        echo '    "levels": {"0": {"statsUserUplink": true, "statsUserDownlink": true}},'
-        echo '    "system": {"statsInboundUplink": true, "statsInboundDownlink": true}'
-        echo '  },'
         echo "  \"inbounds\": $(build_inbounds_json "$PORT" "$DEST_SNI" "$UUID_DIRECT" "$PRIVATE_KEY" "$SHORT_ID"),"
         echo '  "outbounds": ['
         echo '    {"protocol": "freedom", "tag": "direct"}'
         echo '  ],'
         echo '  "routing": {'
         echo '    "rules": ['
-        echo '      {'
-        echo '        "type": "field",'
-        echo '        "inboundTag": ["api"],'
-        echo '        "outboundTag": "api"'
-        echo '      },'
         echo '      {'
         echo '        "type": "field",'
         echo '        "network": "tcp,udp",'
@@ -1036,12 +832,6 @@ check_and_update_core() {
     mkdir -p /tmp/xray_update
     if curl -sL -o /tmp/xray_update/xray.zip "https://github.com/XTLS/Xray-core/releases/download/${latest_ver}/${ZIP_NAME}"; then
         unzip -q -o /tmp/xray_update/xray.zip -d /tmp/xray_update/
-        # 替换内核前，先用现有内核读取并保存尚在内存中的流量。
-        if ! sync_traffic_data; then
-            echo "流量保存失败，已取消内核升级。"
-            rm -rf /tmp/xray_update
-            return 1
-        fi
         mv -f /tmp/xray_update/xray "$XRAY_BIN"
         chmod +x "$XRAY_BIN"
         rm -rf /tmp/xray_update
@@ -1122,7 +912,7 @@ update_menu() {
 }
 
 restart_xray() { echo -e "\n正在重启 Xray..."; do_restart; sleep 1; echo -e "\033[32m重启完成！\033[0m"; read -n 1 -s -r -p "按任意键继续..." </dev/tty; }
-start_xray() { echo -e "\n正在启动 Xray..."; do_start_raw; sleep 1; echo -e "\033[32m启动完成！\033[0m"; read -n 1 -s -r -p "按任意键继续..." </dev/tty; }
+start_xray() { echo -e "\n正在启动 Xray..."; do_start; sleep 1; echo -e "\033[32m启动完成！\033[0m"; read -n 1 -s -r -p "按任意键继续..." </dev/tty; }
 stop_xray() { echo -e "\n正在停止 Xray..."; do_stop; sleep 1; echo -e "\033[33m已停止！\033[0m"; read -n 1 -s -r -p "按任意键继续..." </dev/tty; }
 show_info() { clear; [ -f "$LINK_FILE" ] && cat "$LINK_FILE" || echo "未找到节点信息！"; echo ""; read -n 1 -s -r -p "按任意键返回菜单..." </dev/tty; }
 show_logs() {
@@ -1161,10 +951,7 @@ uninstall_xray() {
 # ----------------- 主菜单 -----------------
 main_menu() {
     while true; do
-        sync_traffic_data
-        load_traffic_env
         clear
-        local total_cur=$(extra_bytes_total "$(bytes_add "$U1_UP" "$U1_DOWN")")
         local core_v=$(get_xray_core_version)
 
         echo "=========================================="
@@ -1172,32 +959,29 @@ main_menu() {
         echo "=========================================="
         echo -e "程序版本: 脚本 \033[1;36mv${SCRIPT_VERSION}\033[0m | 内核 \033[1;32mv${core_v#v}\033[0m"
         echo -e "服务状态: $(get_status)"
-        echo -e "月度流量: 已用 \033[1;33m$(format_bytes $total_cur)\033[0m (重置日: 每月 ${RESET_DAY:-24} 号)"
         echo "------------------------------------------"
         echo " 1. 重启 Xray"
         echo " 2. 启动 Xray"
         echo " 3. 停止 Xray"
         echo " 4. 查看全部节点链接及详细配置"
-        echo " 5. 查看月度流量统计与重置设置"
-        echo " 6. 修改主节点配置 (端口/SNI/UUID/密钥)"
-        echo " 7. TCP BBR 加速状态与管理"
-        echo " 8. 检查与升级 (Xray内核 / 管理脚本)"
-        echo " 9. 查看运行日志"
-        echo " 10. 彻底卸载 Xray"
+        echo " 5. 修改主节点配置 (端口/SNI/UUID/密钥)"
+        echo " 6. TCP BBR 加速与网络调优"
+        echo " 7. 检查与升级 (Xray内核 / 管理脚本)"
+        echo " 8. 查看运行日志"
+        echo " 9. 彻底卸载 Xray"
         echo " 0. 退出菜单"
         echo "=========================================="
-        read -p "请输入选项 [0-10]: " choice </dev/tty
+        read -p "请输入选项 [0-9]: " choice </dev/tty
         case "$choice" in
             1) restart_xray ;;
             2) start_xray ;;
             3) stop_xray ;;
             4) show_info ;;
-            5) show_traffic_menu ;;
-            6) modify_config ;;
-            7) manage_bbr ;;
-            8) update_menu ;;
-            9) show_logs ;;
-            10) uninstall_xray ;;
+            5) modify_config ;;
+            6) manage_bbr ;;
+            7) update_menu ;;
+            8) show_logs ;;
+            9) uninstall_xray ;;
             0) clear; exit 0 ;;
             *) echo -e "\033[31m无效输入！\033[0m"; sleep 1 ;;
         esac
@@ -1228,7 +1012,7 @@ if is_config_complete; then
         mode_choice=1
     else
         echo "请选择运行模式："
-        echo "  1. 保留直连及扩展节点配置升级 (保留对应累计流量)"
+        echo "  1. 保留直连及扩展节点配置升级 (应用网络与传输层调优)"
         echo "  2. 重新配置 (覆盖已有参数，生成新的直连 UUID 及密钥)"
         echo "----------------------------------------------------------"
         read -p "请输入选项 [1-2] (默认 1): " mode_choice </dev/tty
@@ -1236,24 +1020,18 @@ if is_config_complete; then
     fi
 
     if [ "$mode_choice" = "1" ]; then
-        echo -e "\n⏳ 正在执行直连配置升级（直连及扩展节点链接保持不变）..."
-        # 先部署修复后的统计逻辑，兼容旧统计文件中缺失的周期标记。
+        echo -e "\n⏳ 正在执行直连配置升级..."
         write_management_cli
-        if ! /usr/local/bin/xray -s; then
-            echo "流量保存失败，已取消后续升级，未重启 Xray。"
-            exit 1
-        fi
-        init_traffic_db
-        # 在线更新无需替换内核，但必须重建配置以应用直连节点设置。
+        clean_traffic_cron
+        optimize_network
         if [ "$1" != "--auto-upgrade" ]; then
             install_xray_core
-            /usr/local/bin/xray -s || exit 1
         fi
         save_params_env
         render_config_json
         write_service
         update_links_info
-        echo -e "\033[32m🎉 升级完成！直连及扩展节点链接无需重新导入。\033[0m"
+        echo -e "\033[32m🎉 升级完成！已成功应用 TCP 缓冲区与传输层性能调优。\033[0m"
         echo -e "在终端直接输入 \033[1;33mxray\033[0m 即可体验新增功能。\n"
         exit 0
     fi
@@ -1264,6 +1042,7 @@ echo -e "\n====================================="
 echo "开始全新部署流程..."
 echo "====================================="
 install_xray_core
+optimize_network
 
 UUID_DIRECT=$($XRAY_BIN uuid)
 KEYS=$($XRAY_BIN x25519)
@@ -1283,7 +1062,7 @@ save_params_env
 
 render_config_json
 write_service
-init_traffic_db
+clean_traffic_cron
 write_management_cli
 update_links_info
 
