@@ -3,18 +3,17 @@
 # VLESS-Reality 直连版 (Debian & Alpine + 纯IPv4单栈)
 # 特性：
 # 1. 首页清晰显示管理脚本版本与 Xray 内核版本
-# 2. 支持一键添加与删除扩展 Reality 节点 (声明式重构，0损坏风险)
-# 3. 每 2 分钟极速存盘 + 支持终端直接执行 `xray -s` 瞬时存盘
-# 4. 重启/停止前强制自动存盘 (杜绝丢漏统计)
-# 5. 默认每月 24 日重置月度流量 (持久化存盘，进程重启不丢失)
-# 6. 主节点与扩展节点流量独立统计，升级保留累计流量
-# 7. TCP BBR 状态检测与环境识别 (支持机器开启，容器小鸡友好提示)
-# 8. 修改 SNI 伪装域名自动握手与证书体积极速体检
-# 9. 低内存 (<=256MB) 自动注入防 OOM 调优参数
-# 10. Xray 内核与管理脚本在线独立检查升级
+# 2. 每 2 分钟极速存盘 + 支持终端直接执行 `xray -s` 瞬时存盘
+# 3. 重启/停止前强制自动存盘 (杜绝丢漏统计)
+# 4. 默认每月 24 日重置月度流量 (持久化存盘，进程重启不丢失)
+# 5. 主节点与扩展节点流量独立统计，升级保留累计流量
+# 6. TCP BBR 状态检测与环境识别 (支持机器开启，容器小鸡友好提示)
+# 7. 修改 SNI 伪装域名自动握手与证书体积极速体检
+# 8. 低内存 (<=256MB) 自动注入防 OOM 调优参数
+# 9. Xray 内核与管理脚本在线独立检查升级
 # ==============================================================================
 
-SCRIPT_VERSION="0.0.12"
+SCRIPT_VERSION="0.0.13"
 SCRIPT_URL="https://github.com/justly110/reality/raw/main/xray.sh"
 
 ENV_FILE="/usr/local/etc/xray/params.env"
@@ -384,7 +383,7 @@ write_management_cli() {
     cat > /usr/local/bin/xray << 'EOF_MANAGEMENT_SCRIPT'
 #!/bin/bash
 
-SCRIPT_VERSION="0.0.12"
+SCRIPT_VERSION="0.0.13"
 SCRIPT_URL="https://github.com/justly110/reality/raw/main/xray.sh"
 
 ENV_FILE="/usr/local/etc/xray/params.env"
@@ -690,167 +689,6 @@ show_traffic_menu() {
             *) echo -e "\033[31m无效输入！\033[0m"; sleep 1 ;;
         esac
     done
-}
-
-# ----------------- 检查端口占用与生成未占用随机端口 -----------------
-is_port_in_use() {
-    local check_p="$1"
-    # 用 bash 自带的 /dev/tcp 探测，不依赖 ss/netstat/lsof 及其正则方言
-    if (echo >/dev/tcp/127.0.0.1/"$check_p") >/dev/null 2>&1; then
-        return 0
-    fi
-    if (echo >/dev/tcp/0.0.0.0/"$check_p") >/dev/null 2>&1; then
-        return 0
-    fi
-    return 1
-}
-
-get_random_unused_port() {
-    local p=0
-    while true; do
-        p=$(( 20000 + RANDOM % 20001 ))
-        if ! is_port_in_use "$p" && ! grep -q "^$p|" "$EXTRA_NODES_FILE" 2>/dev/null; then
-            echo "$p"
-            return
-        fi
-    done
-}
-
-# ----------------- 一键添加 Reality 节点 -----------------
-add_reality_node() {
-    load_env
-    clear
-    echo "=========================================="
-    echo "         一键添加新 Reality 节点          "
-    echo "=========================================="
-    echo "提示：回车留空端口将自动在 20000-40000 间随机挑选未占用的空闲端口。"
-    read -p "请输入新节点端口 (回车自动随机): " user_port </dev/tty
-
-    local final_port=""
-    if [ -z "$user_port" ]; then
-        final_port=$(get_random_unused_port)
-        echo -e "✔ 已自动分配空闲随机端口: \033[1;36m$final_port\033[0m"
-    else
-        if [[ "$user_port" =~ ^[0-9]+$ ]] && [ "$user_port" -ge 1 ] && [ "$user_port" -le 65535 ]; then
-            if is_port_in_use "$user_port" || grep -q "^$user_port|" "$EXTRA_NODES_FILE" 2>/dev/null; then
-                echo -e "\033[31m❌ 端口 $user_port 已被占用！\033[0m"
-                read -n 1 -s -r -p "按任意键返回..." </dev/tty; return
-            fi
-            final_port="$user_port"
-        else
-            echo -e "\033[31m❌ 端口格式不合法！\033[0m"
-            read -n 1 -s -r -p "按任意键返回..." </dev/tty; return
-        fi
-    fi
-
-    echo "------------------------------------------"
-    read -p "请输入伪装域名 SNI (留空默认使用主节点 SNI: $DEST_SNI): " custom_sni </dev/tty
-    local final_sni="${custom_sni:-$DEST_SNI}"
-    if ! verify_sni_health "$final_sni"; then
-        echo -e "\033[31m已取消添加新节点。\033[0m"
-        read -n 1 -s -r -p "按任意键返回..." </dev/tty; return
-    fi
-
-    read -p "请输入节点备注名称 (默认: Reality-${final_port}): " custom_tag </dev/tty
-    local final_tag="${custom_tag:-Reality-${final_port}}"
-
-    echo -e "\n⏳ 正在生成独立凭证并注入配置..."
-    local new_uuid=$($XRAY_BIN uuid)
-    local new_sid=$(openssl rand -hex 8)
-
-    # 声明式存入 extra_nodes.env
-    echo "${final_port}|${new_uuid}|${new_sid}|${final_sni}|${final_tag}" >> "$EXTRA_NODES_FILE"
-
-    # 全量重建合法 JSON，杜绝文本替换导致语法破损
-    rebuild_and_apply
-
-    local s_v4=$(curl -s4 -m 5 ip.sb 2>/dev/null || curl -s4 -m 5 ifconfig.me 2>/dev/null || curl -s4 -m 5 api.ipify.org 2>/dev/null)
-    local host_v4="${s_v4:-你的本机IPv4}"
-    local new_link="vless://${new_uuid}@${host_v4}:${final_port}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=chrome&type=tcp&flow=xtls-rprx-vision&sni=${final_sni}&sid=${new_sid}#${final_tag}"
-
-    clear
-    echo "=========================================="
-    echo -e "\033[32m🎉 新 Reality 节点添加成功！\033[0m"
-    echo "=========================================="
-    echo "端口 (Port)   : $final_port"
-    echo "伪装域名 (SNI): $final_sni"
-    echo "UUID          : $new_uuid"
-    echo "ShortId       : $new_sid"
-    echo "公钥 (pbk)    : $PUBLIC_KEY"
-    echo "------------------------------------------"
-    echo "● 节点链接: "
-    echo "$new_link"
-    echo "=========================================="
-    echo "提示：链接已自动保存，可在主菜单第 4 项随时查看。"
-    echo ""
-    read -n 1 -s -r -p "按任意键返回管理菜单..." </dev/tty
-}
-
-# ----------------- 一键删除扩展 Reality 节点 -----------------
-delete_reality_node() {
-    clear
-    echo "=========================================="
-    echo "         删除扩展 Reality 节点            "
-    echo "=========================================="
-
-    if [ ! -f "$EXTRA_NODES_FILE" ] || [ ! -s "$EXTRA_NODES_FILE" ]; then
-        echo -e "\033[33m当前没有可删除的扩展节点（主节点受保护不可在此删除）。\033[0m"
-        echo "=========================================="
-        read -n 1 -s -r -p "按任意键返回管理菜单..." </dev/tty
-        return
-    fi
-
-    echo "当前已添加的扩展节点列表："
-    local idx=1
-    local ports_arr=()
-    while IFS='|' read -r e_port e_uuid e_sid e_sni e_tag; do
-        [ -z "$e_port" ] && continue
-        ports_arr+=("$e_port")
-        echo " [$idx] 端口: $e_port | 标签: $e_tag | 伪装SNI: $e_sni"
-        ((idx++))
-    done < "$EXTRA_NODES_FILE"
-
-    echo "------------------------------------------"
-    read -p "请输入要删除的节点序号 [1-${#ports_arr[@]}] (输入 0 取消): " del_idx </dev/tty
-
-    if [ "$del_idx" = "0" ] || [ -z "$del_idx" ]; then
-        return
-    fi
-
-    if ! [[ "$del_idx" =~ ^[0-9]+$ ]] || [ "$del_idx" -lt 1 ] || [ "$del_idx" -gt "${#ports_arr[@]}" ]; then
-        echo -e "\033[31m无效的选择序号！\033[0m"
-        sleep 1
-        return
-    fi
-
-    local target_port="${ports_arr[$((del_idx-1))]}"
-    local target_idx=$((del_idx - 1))
-
-    echo -e "\n⏳ 正在清理配置并重启服务..."
-
-    # 同步移除该节点的流量记录，保持与 extra_nodes.env 行序一致
-    load_traffic_env
-    if [ "${#EX_UP[@]}" -gt 0 ]; then
-        local new_up=() new_down=() ex_i
-        for ex_i in "${!EX_UP[@]}"; do
-            [ "$ex_i" -eq "$target_idx" ] && continue
-            new_up+=("${EX_UP[$ex_i]}")
-            new_down+=("${EX_DOWN[$ex_i]}")
-        done
-        EX_UP=("${new_up[@]+"${new_up[@]}"}")
-        EX_DOWN=("${new_down[@]+"${new_down[@]}"}")
-        save_traffic_env
-    fi
-
-    # 从 extra_nodes.env 移除该端口行
-    sed -i "/^${target_port}|/d" "$EXTRA_NODES_FILE"
-
-    # 全量重建配置，保证 JSON 结构 100% 合法
-    rebuild_and_apply
-
-    echo -e "\033[32m✔ 已成功删除端口为 ${target_port} 的 Reality 节点！\033[0m"
-    echo ""
-    read -n 1 -s -r -p "按任意键返回管理菜单..." </dev/tty
 }
 
 # ----------------- TCP BBR 状态检测与管理 -----------------
@@ -1341,29 +1179,25 @@ main_menu() {
         echo " 3. 停止 Xray"
         echo " 4. 查看全部节点链接及详细配置"
         echo " 5. 查看月度流量统计与重置设置"
-        echo " 6. 一键添加新 Reality 节点 (支持自定义或随机端口)"
-        echo " 7. 一键删除扩展 Reality 节点"
-        echo " 8. 修改主节点配置 (端口/SNI/UUID/密钥)"
-        echo " 9. TCP BBR 加速状态与管理"
-        echo " 10. 检查与升级 (Xray内核 / 管理脚本)"
-        echo " 11. 查看运行日志"
-        echo " 12. 彻底卸载 Xray"
+        echo " 6. 修改主节点配置 (端口/SNI/UUID/密钥)"
+        echo " 7. TCP BBR 加速状态与管理"
+        echo " 8. 检查与升级 (Xray内核 / 管理脚本)"
+        echo " 9. 查看运行日志"
+        echo " 10. 彻底卸载 Xray"
         echo " 0. 退出菜单"
         echo "=========================================="
-        read -p "请输入选项 [0-12]: " choice </dev/tty
+        read -p "请输入选项 [0-10]: " choice </dev/tty
         case "$choice" in
             1) restart_xray ;;
             2) start_xray ;;
             3) stop_xray ;;
             4) show_info ;;
             5) show_traffic_menu ;;
-            6) add_reality_node ;;
-            7) delete_reality_node ;;
-            8) modify_config ;;
-            9) manage_bbr ;;
-            10) update_menu ;;
-            11) show_logs ;;
-            12) uninstall_xray ;;
+            6) modify_config ;;
+            7) manage_bbr ;;
+            8) update_menu ;;
+            9) show_logs ;;
+            10) uninstall_xray ;;
             0) clear; exit 0 ;;
             *) echo -e "\033[31m无效输入！\033[0m"; sleep 1 ;;
         esac
