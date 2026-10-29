@@ -11,7 +11,7 @@
 # 7. Xray 内核与管理脚本在线独立检查升级
 # ==============================================================================
 
-SCRIPT_VERSION="0.0.14"
+SCRIPT_VERSION="0.0.15"
 SCRIPT_URL="https://github.com/justly110/reality/raw/main/xray.sh"
 
 ENV_FILE="/usr/local/etc/xray/params.env"
@@ -138,17 +138,20 @@ install_xray_core() {
     echo "====================================="
     local MACHINE=$(uname -m)
     local ZIP_NAME=""
-    if [ "$MACHINE" = "x86_64" ] || [ "$MACHINE" = "amd64" ]; then
-        ZIP_NAME="Xray-linux-64.zip"
-    elif [ "$MACHINE" = "aarch64" ] || [ "$MACHINE" = "arm64" ]; then
-        ZIP_NAME="Xray-linux-arm64-v8a.zip"
-    else
-        echo "❌ 不支持的 CPU 架构: $MACHINE"
-        exit 1
-    fi
+    case "$MACHINE" in
+        x86_64|amd64) ZIP_NAME="Xray-linux-64.zip" ;;
+        aarch64|arm64) ZIP_NAME="Xray-linux-arm64-v8a.zip" ;;
+        *)
+            echo "❌ 不支持的 CPU 架构: $MACHINE"
+            exit 1
+            ;;
+    esac
 
     local VERSION=$(curl -sL -m 8 -o /dev/null -w %{url_effective} https://github.com/XTLS/Xray-core/releases/latest | grep -oE '[^/]+$')
-    if [ -z "$VERSION" ]; then
+    if [ -z "$VERSION" ] || [ "$VERSION" = "latest" ]; then
+        VERSION=$(curl -sL -m 8 https://api.github.com/repos/XTLS/Xray-core/releases/latest 2>/dev/null | grep '"tag_name":' | head -n 1 | cut -d '"' -f 4)
+    fi
+    if [ -z "$VERSION" ] || [ "$VERSION" = "latest" ]; then
         if [ -f "$XRAY_BIN" ]; then
             echo "⚠️ 无法获取 GitHub 最新版本，保留现有内核继续运行。"
             return 0
@@ -392,7 +395,7 @@ write_management_cli() {
     cat > /usr/local/bin/xray << 'EOF_MANAGEMENT_SCRIPT'
 #!/bin/bash
 
-SCRIPT_VERSION="0.0.14"
+SCRIPT_VERSION="0.0.15"
 SCRIPT_URL="https://github.com/justly110/reality/raw/main/xray.sh"
 
 ENV_FILE="/usr/local/etc/xray/params.env"
@@ -802,9 +805,12 @@ check_and_update_core() {
     cur_ver="v${cur_ver#v}"
     echo "正在获取官方最新版本信息..."
     local latest_ver=$(curl -sL -m 8 -o /dev/null -w %{url_effective} https://github.com/XTLS/Xray-core/releases/latest | grep -oE '[^/]+$')
+    if [ -z "$latest_ver" ] || [ "$latest_ver" = "latest" ]; then
+        latest_ver=$(curl -sL -m 8 https://api.github.com/repos/XTLS/Xray-core/releases/latest 2>/dev/null | grep '"tag_name":' | head -n 1 | cut -d '"' -f 4)
+    fi
     latest_ver="v${latest_ver#v}"
 
-    if [ -z "$latest_ver" ] || [ "$latest_ver" = "v" ]; then
+    if [ -z "$latest_ver" ] || [ "$latest_ver" = "v" ] || [ "$latest_ver" = "vlatest" ]; then
         echo -e "\033[31m❌ 无法获取最新版本号，请检查网络！\033[0m"
         read -n 1 -s -r -p "按任意键返回..." </dev/tty
         return
@@ -826,8 +832,15 @@ check_and_update_core() {
     echo -e "\n⏳ 正在拉取 Xray ${latest_ver}..."
     local MACHINE=$(uname -m)
     local ZIP_NAME=""
-    [ "$MACHINE" = "x86_64" ] || [ "$MACHINE" = "amd64" ] && ZIP_NAME="Xray-linux-64.zip"
-    [ "$MACHINE" = "aarch64" ] || [ "$MACHINE" = "arm64" ] && ZIP_NAME="Xray-linux-arm64-v8a.zip"
+    case "$MACHINE" in
+        x86_64|amd64) ZIP_NAME="Xray-linux-64.zip" ;;
+        aarch64|arm64) ZIP_NAME="Xray-linux-arm64-v8a.zip" ;;
+        *)
+            echo -e "\033[31m❌ 不支持的 CPU 架构: $MACHINE\033[0m"
+            read -n 1 -s -r -p "按任意键返回..." </dev/tty
+            return 1
+            ;;
+    esac
 
     mkdir -p /tmp/xray_update
     if curl -sL -o /tmp/xray_update/xray.zip "https://github.com/XTLS/Xray-core/releases/download/${latest_ver}/${ZIP_NAME}"; then
