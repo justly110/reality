@@ -11,7 +11,7 @@
 # 7. Xray 内核与管理脚本在线独立检查升级
 # ==============================================================================
 
-SCRIPT_VERSION="0.0.15"
+SCRIPT_VERSION="0.0.16"
 SCRIPT_URL="https://github.com/justly110/reality/raw/main/xray.sh"
 
 ENV_FILE="/usr/local/etc/xray/params.env"
@@ -395,7 +395,7 @@ write_management_cli() {
     cat > /usr/local/bin/xray << 'EOF_MANAGEMENT_SCRIPT'
 #!/bin/bash
 
-SCRIPT_VERSION="0.0.15"
+SCRIPT_VERSION="0.0.16"
 SCRIPT_URL="https://github.com/justly110/reality/raw/main/xray.sh"
 
 ENV_FILE="/usr/local/etc/xray/params.env"
@@ -569,7 +569,7 @@ verify_sni_health() {
     fi
 
     local tls_out=$(timeout 5 openssl s_client -connect "${sni}:443" -servername "${sni}" -tls1_3 </dev/null 2>&1)
-    if ! echo "$tls_out" | grep -qE "Protocol *: *TLSv1.3"; then
+    if ! echo "$tls_out" | grep -qE "(Protocol.*TLSv1\.3|New, *TLSv1\.3)"; then
         echo -e "\033[31m❌ 严重不推荐: 该域名未通过 TLS 1.3 握手！\033[0m"
         echo -e "   Reality 协议严格依赖 TLS 1.3，使用此域名极易导致客户端断连。"
         read -p "是否强制忽略警告继续使用？[y/N]: " f_use </dev/tty
@@ -584,8 +584,10 @@ verify_sni_health() {
         echo -e "   小内存 VPS 上有超出 Xray 8KB 缓冲区风险，推荐选用小于 5KB 的站点（如 addons.mozilla.org）。"
         read -p "是否确认使用此域名？[Y/n]: " c_use </dev/tty
         [[ "$c_use" =~ ^[nN]$ ]] && return 1
-    else
+    elif [ "$cert_bytes" -gt 0 ]; then
         echo -e "✔ 体检通过: 完美支持 TLS 1.3，证书体积安全 (${cert_bytes} 字节)。"
+    else
+        echo -e "✔ 已跳过证书体积检测。"
     fi
     return 0
 }
