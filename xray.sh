@@ -11,7 +11,7 @@
 # 7. Xray 内核与管理脚本在线独立检查升级
 # ==============================================================================
 
-SCRIPT_VERSION="0.0.16"
+SCRIPT_VERSION="0.0.17"
 SCRIPT_URL="https://github.com/justly110/reality/raw/main/xray.sh"
 
 ENV_FILE="/usr/local/etc/xray/params.env"
@@ -395,7 +395,7 @@ write_management_cli() {
     cat > /usr/local/bin/xray << 'EOF_MANAGEMENT_SCRIPT'
 #!/bin/bash
 
-SCRIPT_VERSION="0.0.16"
+SCRIPT_VERSION="0.0.17"
 SCRIPT_URL="https://github.com/justly110/reality/raw/main/xray.sh"
 
 ENV_FILE="/usr/local/etc/xray/params.env"
@@ -1070,7 +1070,7 @@ if [ -z "$PRIVATE_KEY" ] || [ -z "$PUBLIC_KEY" ]; then
 fi
 SHORT_ID=$(openssl rand -hex 8)
 
-DEST_SNI="addons.mozilla.org"
+DEST_SNI="gateway.icloud.com"
 PORT=443
 
 save_params_env
