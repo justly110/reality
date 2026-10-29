@@ -1,140 +1,138 @@
-# Xray 极简部署与管理指南
+<div align="center">
 
-本项目基于 Xray-core 提供两个专精脚本，完美兼容 **Debian / Ubuntu** 以及 **Alpine Linux**。无论是一台机器自用，还是两台机器组合构建「中转 + 落地」链式代理，均可一键完成部署。
+# ⚡ Xray VLESS-Reality 极速一键部署脚本
 
----
+轻量 · 高性能 · 深度网络调优 · 极简交互
 
-## 📌 脚本功能与定位
+[![Xray-core](https://img.shields.io/badge/Xray--core-v26.10.21-blue.svg?logo=github)](https://github.com/XTLS/Xray-core)
+[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![Platform](https://img.shields.io/badge/Platform-Debian%20%7C%20Ubuntu%20%7C%20Alpine-orange.svg)](#-系统要求)
+[![Arch](https://img.shields.io/badge/Arch-x86__64%20%7C%20arm64-lightgrey.svg)](#-系统要求)
 
-| 脚本文件 | 定位与核心用途 | 核心特性 | 默认端口 |
-| :--- | :--- | :--- | :--- |
-| **`xray.sh`** | **VLESS-Reality 分流中转版**<br>*(适合：前置机 / 优化线路中转机 / 单机自用)* | • **双用户分流**：同时生成「本机直连」与「落地转发」双节点<br>• **内存自适应**：自动判定内存（≤256MB 自动开启防 OOM 限制）<br>• **平滑升级**：保留现有配置一键无损升级，客户端免换链接<br>• **流量监控**：分节点实时统计上/下行及总流量<br>• **在线更新**：后台独立检查更新 Xray 内核与管理脚本 | `443` |
-| **`xray-ss.sh`** | **Shadowsocks-2022 极轻落地版**<br>*(适合：流媒体解锁落地机 / NAT 机 / 玩具小鸡)* | • **极致精简**：采用 `2022-blake3-aes-128-gcm` 高性能加密<br>• **极低内存占用**：深度锁死内存占用（日常仅占 15~25MB）<br>• **纯 IPv4 适配**：适合各类低配小内存及 NAT 机器作为落地出口 | `30333` |
-
----
-
-## 🚀 1. 架构与部署方式
-
-> **前置依赖**：若系统提示缺少基础命令，请先安装：  
-> • Debian/Ubuntu: `apt update && apt install -y wget curl openssl unzip`  
-> • Alpine: `apk update && apk add wget curl openssl unzip bash`
+</div>
 
 ---
 
-### 方案 A：双机中转分流方案（推荐 ⭐⭐⭐）
-* **流程**：客户端 ➔ **国内/优化线路前置机 (`xray.sh`)** ➔ **境外流媒体落地机 (`xray-ss.sh`)**
-* **步骤**：
-  1. **第一步（先装落地机）**：在落地机上执行 `xray-ss.sh` 安装，记录输出的 **落地 IP、端口(30333)、密钥密码**。
-  2. **第二步（再装中转机）**：在前置中转机上执行 `xray.sh`，根据提示填入第一步获取的落地机参数即可。
+## 📖 项目简介
+
+专为 Linux VPS（Debian / Ubuntu / Alpine）打造的 **Xray VLESS-Reality (Vision)** 极速搭建与运维脚本。  
+精简优化，纯粹高效。不仅支持快速部署与交互式管理，还内置了**长肥管道网络优化**、**SNI 域名健康体检**、**低内存防 OOM 自动保护**以及**双独立在线升级**等实用特性。
 
 ---
 
-### 方案 B：单机直连 Reality
-* 适合线路良好的 VPS，只需部署 `xray.sh`，安装时落地机参数直接留空回车即可，客户端使用生成的「节点 1：本机直连」节点。
+## ✨ 核心特性
+
+- 🚀 **深度内核网络调优**：
+  - 自动启用 **BBR + FQ** 拥塞控制算法。
+  - 深度注入 **32MB TCP 动态缓冲区** 及长肥管道参数，显著提升高延迟、跨洲跨洋线路的吞吐速度。
+  - 开启 **TCP Fast Open** 与 **15s TCP KeepAlive**，禁用无用服务端嗅探，降低握手延迟与资源开销。
+- 🛡️ **纯粹原生安全**：
+  - 基于最新官方规范：`VLESS` + `Reality` + `xtls-rprx-vision`。
+  - 默认伪装站点选用 `addons.mozilla.org`，避开被官方封禁告警的敏感域名。
+  - 支持**修改 SNI 自动握手体检**：自动验证目标站点是否支持 TLS 1.3 以及证书体积是否安全（防超 8KB 缓冲区）。
+- 🖥️ **全终端命令行后台**：
+  - 部署完成后直接在终端输入 `xray` 即可呼出多功能交互式管理菜单。
+  - 支持随时查看节点链接、修改端口/SNI/密钥/UUID、查看日志与服务管理。
+- 📉 **极低资源自适应（小鸡友好）**：
+  - 识别物理内存 $\le 256\text{MB}$ 环境，自动注入 Go 运行时内存防 OOM 调优参数，杜绝因瞬时握手导致的内存溢出杀进程。
+- 🔄 **双独立在线平滑升级**：
+  - 内核（`xray-core`）与管理脚本（`xray.sh`）支持在线独立一键检测与平滑升级，无需重复配置。
+- 🌐 **双系统全环境支持**：
+  - 完美适配基于 **Systemd** 的发行版（Debian 10+ / Ubuntu 20.04+）。
+  - 原生适配基于 **OpenRC** 的超轻量发行版（Alpine Linux）。
 
 ---
 
-## 📥 2. 一键安装命令
+## 💻 一键安装与使用
 
-### ① 安装 VLESS-Reality 入口 / 中转机（`xray.sh`）
-在服务器终端（Root 权限）执行：
+### 1. 一键快速安装
+
+在服务器终端中以 `root` 权限运行以下指令即可：
+
 ```bash
-bash <(wget -qO- https://github.com/justly110/reality/raw/main/xray.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/justly110/reality/main/xray.sh)
 ```
-> **提示**：若本机已部署过该脚本，再次运行此命令将自动识别已有参数，并提示是否**保留现有配置平滑升级**（客户端链接无需变动即可享用流量监控等新功能）。
+
+> **备用命令（通过 wget）：**
+> ```bash
+> wget -O xray.sh https://raw.githubusercontent.com/justly110/reality/main/xray.sh && bash xray.sh
+> ```
 
 ---
 
-### ② 安装 Shadowsocks-2022 落地机（`xray-ss.sh`）
-在落地 VPS 终端（Root 权限）执行：
-```bash
-bash <(wget -qO- https://github.com/justly110/reality/raw/main/xray-ss.sh)
-```
+### 2. 随时呼出管理面板
 
----
-
-## 🖥️ 3. 后台管理面板
-
-无论安装了哪一个脚本，在终端中直接输入 `xray` 即可打开专属管理菜单：
+安装成功后，脚本已自动注册系统全局命令，在终端任意路径直接输入：
 
 ```bash
 xray
 ```
 
-### 菜单界面预览对比
+即可进入管理后台：
 
-#### `xray.sh` 管理后台界面（功能全面）：
 ```text
 ==========================================
-      Xray-Reality 流量分流管理后台       
+      Xray-Reality 直连节点管理后台       
 ==========================================
-程序版本: 脚本 v0.0.8 | 内核 v26.3.27
+程序版本: 脚本 v0.0.15 | 内核 v26.10.21
 服务状态: ● 正在运行 (Running)
-月度流量: 已用 251.96 GB / 限额 1000 GB (重置日: 每月 24 号)
 ------------------------------------------
  1. 重启 Xray
  2. 启动 Xray
  3. 停止 Xray
  4. 查看全部节点链接及详细配置
- 5. 查看月度流量统计与熔断设置
- 6. 一键添加新 Reality 节点 (支持自定义或随机端口)
- 7. 一键删除扩展 Reality 节点
- 8. 修改主节点配置 (端口/SNI/UUID/落地机)
- 9. 测试落地机连通性与握手延迟
- 10. TCP BBR 加速状态与管理
- 11. 检查与升级 (Xray内核 / 管理脚本)
- 12. 查看运行日志
- 13. 彻底卸载 Xray
+ 5. 修改主节点配置 (端口/SNI/UUID/密钥)
+ 6. TCP BBR 加速与网络调优
+ 7. 检查与升级 (Xray内核 / 管理脚本)
+ 8. 查看运行日志
+ 9. 彻底卸载 Xray
  0. 退出菜单
 ==========================================
 ```
 
-#### `xray-ss.sh` 管理后台界面（极简轻量）：
+---
+
+## 📁 核心文件与路径说明
+
+| 文件路径 | 说明 |
+| :--- | :--- |
+| `/usr/local/bin/xray-core` | Xray 核心执行二进制程序 |
+| `/usr/local/bin/xray` | 面板快捷管理脚本（终端命令 `xray`） |
+| `/usr/local/etc/xray/config.json` | Xray 核心服务端运行配置文件 |
+| `/usr/local/etc/xray/params.env` | 当前节点的核心参数持久化环境变量 |
+| `/usr/local/etc/xray/link.txt` | 节点直连链接与参数明细备份 |
+| `/usr/local/etc/xray/extra_nodes.env`| 多端口/多用户扩展节点记录文件 |
+
+---
+
+## ⚙️ 系统要求
+
+- **操作系统**：
+  - Debian 10+
+  - Ubuntu 20.04+
+  - Alpine Linux 3.16+
+- **CPU 架构**：
+  - `x86_64` / `amd64`
+  - `aarch64` / `arm64`
+- **基础依赖**：脚本会自动检查并安装 `curl`、`openssl`、`unzip` 等基础工具。
+
+---
+
+## 📱 客户端兼容性指南
+
+生成的节点链接协议格式为：
 ```text
-==========================================
-     Xray-Shadowsocks 极简后台管理        
-==========================================
-服务状态: ● 正在运行 (Running)
-------------------------------------------
- 1. 重启 Xray
- 2. 启动 Xray
- 3. 停止 Xray
- 4. 查看节点链接及配置
- 5. 修改节点配置 (端口/密钥)
- 6. 查看运行日志
- 7. 彻底卸载 Xray
- 0. 退出菜单
-==========================================
+vless://${UUID}@${IP}:${PORT}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=chrome&type=tcp&flow=xtls-rprx-vision&sni=${SNI}&sid=${SHORT_ID}#节点名称
 ```
 
----
-
-## ⚡ 4. 核心特性说明
-
-### 1. 实时流量统计监控（仅 `xray.sh`）
-进入菜单输入 `5`，即可通过本地只读 API 查看两个分流节点的精确使用量：
-* **本机直连节点**：上行 / 下行 / 合计流量
-* **落地转发节点**：上行 / 下行 / 合计流量
-* **总用量**：自动根据流量大小转换为 `MB` 或 `GB`。
-
-### 2. 独立在线升级（仅 `xray.sh`）
-进入菜单输入 `11`，支持：
-* **单独检查并更新 Xray 内核**：直接比对 GitHub 官方最新发布版本，一键替换核心并重启。
-* **单独检查并更新管理脚本**：自动比对远程仓库版本，无损热更新管理后台。
-
-### 3. 自动内存优化机制
-针对 ≤256MB 的 NAT 或极低内存机器，脚本会自动应用 Go 运行时内存限制：
-* `GOGC=20`（激进垃圾回收）
-* `GOMEMLIMIT=30MiB`（内存软上限限制）
-* `GODEBUG=madvdontneed=1`（内存使用完毕立即归还操作系统）  
-*内存 > 256MB 的机器将自动保持默认高性能调度，兼顾性能与防爆内存。*
+- **v2rayN / v2rayNG / Sing-box / Shadowrocket**：直接导入上方生成的链接即可使用。
+- **FlClash / Clash Verge Rev (Mihomo 内核)**：
+  - 由于新版 Xray-core（v26.9.8+）强化了对 Chrome 指纹的后量子协商检测，Mihomo 内核需在 `reality-opts` 中包含 `support-x25519mlkem768: true`。
+  - 建议搭配配套的订阅转换工具使用以获得最佳兼容性。
 
 ---
 
-## 🛡️ 5. 最佳配置建议（Reality 防封）
+## ⚠️ 免责声明
 
-| 配置项 | 推荐值 | 说明 |
-| :--- | :--- | :--- |
-| **监听端口 (Port)** | `443` | HTTPS 标准默认端口，与 SNI 伪装最契合，抗封锁能力最强 |
-| **伪装域名 (SNI)** | `addons.mozilla.org` | Mozilla 官方插件站，自带白名单光环，支持 TLS 1.3 与 HTTP/2 |
-| **目标地址 (dest)** | `addons.mozilla.org:443` | 证书体积极小（约 4.4KB），杜绝 Xray 在小内存下因证书超出 8KB 缓冲区崩溃的问题 |
+- 本项目仅供网络技术学习、科研与管理自身 VPS 使用。
+- 请遵守服务器所在地区以及相关法律法规，请勿用于非法用途。
